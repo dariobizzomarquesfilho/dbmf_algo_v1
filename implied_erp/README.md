@@ -1,130 +1,72 @@
-# Extrator de ERP por País — Damodaran
+# Damodaran ERP Extraction Pipeline
 
-## Descrição
+Extracts country-level equity risk premiums (ERP) from Damodaran's NYU Stern spreadsheet (`ctryprem*.xlsx`) and builds a point-in-time (PIT) history for use in the Lean backtest.
 
-Este programa extrai dados de **Risco de Mercado Implícito por País (ERP)** da planilha **ctryprem\*.xlsx** do Damodaran. Ele converte a planilha da NYU Stern School of Business com todos os dados de ERP por país para um formato estruturado em JSON, pronto para análise quantitativa.
+## Modules
 
-## Como funciona
+### 1. Full Extraction (`extract_damodaran_erp.py`)
 
-O script lê a planilha `ctryprem*.xlsx` e processa a aba **"ERPs by country"**, extraindo três tipos de informações:
+Parses the `ctryprem*.xlsx` sheet "ERPs by country" and extracts all fields into structured JSON.
 
-### 1. Metadados (linhas 1-7)
-- **Data de atualização**: Quando os dados foram compilados
-- **ERP de mercados maduros**: Risco de mercado para economias desenvolvidas
-- **ERP dos EUA**: Risco de mercado específico para os Estados Unidos
-
-### 2. Países regulares (com classificação de risco)
-- Mais de 100 países com classificação de risco soberano Moody's
-- Inclui colunas como: Moody's Rating, Rating Default Spread, Total Equity Risk Premium, Country Risk Premium, CDS soberanos, entre outras
-- Estruturado como um dicionário com tipos de dados apropriados (strings para ratings, floats para valores numéricos)
-
-### 3. Mercados fronteiriços (sem classificação de risco)
-- Países sem classificação de risco soberano padrão
-- Contém dados mais básicos: PRS Score, ERP, CRP, Default Spread
-- Marcados com flag `is_frontier: true`
-
-## Uso
-
+**Usage:**
 ```bash
-# Salvar em arquivo JSON
-python extract_damodaran_erp.py --xlsx "caminho/ctrypremJuly26.xlsx" --out "dados.json"
+# Save to JSON file
+python extract_damodaran_erp.py --xlsx "path/to/ctrypremJuly26.xlsx" --out "output.json"
 
-# Exibir no terminal (JSON formatado)
-python extract_damodaran_erp.py --xlsx "caminho/ctrypremJuly26.xlsx"
+# Display in terminal (formatted JSON)
+python extract_damodaran_erp.py --xlsx "path/to/ctrypremJuly26.xlsx"
 ```
 
-## Formato de saída
+**Output fields:**
+- **Metadata:** update date, mature market ERP, US ERP
+- **Regular countries:** Moody's rating, default spread, total equity risk premium, country risk premium, sovereign CDS, alternative CDS-based ERPs
+- **Frontier markets:** PRS score, ERP, CRP, default spread (no Moody's rating)
 
-O JSON contém um dicionário com as seguintes chaves de alto nível:
+### 2. Lightweight Build (`build_damodaran_erp.py`)
 
-- **`source`**: Nome do arquivo de origem processado
-- **`updated`**: String com a data de atualização
-- **`mature_market_erp`**: Float com o ERP de mercados maduros (ou `null`)
-- **`us_erp`**: Float com o ERP dos EUA (ou `null`)
-- **`countries`**: Dicionário onde cada chave é o nome do país e o valor é um dicionário com os campos abaixo
+Extracts a minimal country → Total Equity Risk Premium map from the same spreadsheet. Faster and smaller than the full extraction.
 
-### Países Regulares
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `is_frontier` | bool | `false` |
-| `region` | string | Região geográfica (ex: "Africa") |
-| `moody_rating` | string | Classificação Moody's (ex: "B3") |
-| `rating_default_spread` | float | Default spread baseado no rating |
-| `total_equity_risk_premium` | float | ERP total |
-| `country_risk_premium` | float | CRP (Country Risk Premium) |
-| `sovereign_cds_net` | float | CDS soberano líquido (ou null) |
-| `total_equity_risk_premium2` | float | ERP alternativo (calculado via CDS) |
-| `country_risk_premium3` | float | CRP alternativo (calculado via CDS) |
+**Usage:**
+```bash
+# Default input/output paths
+python build_damodaran_erp.py
 
-### Mercados Fronteiriços
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `is_frontier` | bool | `true` |
-| `prs_score` | float | Pontuação PRS (Political Risk Score) |
-| `erp` | float | ERP |
-| `crp` | float | CRP |
-| `default_spread` | float | Default spread |
-
-### Exemplo: Angola (Regular)
-
-```json
-{
-  "Angola": {
-    "is_frontier": false,
-    "region": "Africa",
-    "moody_rating": "B3",
-    "rating_default_spread": 0.0596,
-    "total_equity_risk_premium": 0.1344,
-    "country_risk_premium": 0.0927,
-    "sovereign_cds_net": 0.049,
-    "total_equity_risk_premium2": 0.1179,
-    "country_risk_premium3": 0.0762
-  }
-}
+# Custom paths
+python build_damodaran_erp.py --xlsx "path/to/ctryprem.xlsx" --out "output.json"
 ```
 
-### Exemplo: Argélia (Fronteiriço)
+**Default output:** `implied_erp/data/damodaran_erp.json`
 
-```json
-{
-  "Algeria": {
-    "is_frontier": true,
-    "prs_score": 66.25,
-    "erp": 0.1059,
-    "crp": 0.0642,
-    "default_spread": 0.0413
-  }
-}
+### 3. PIT Pipeline Scripts (`scripts/`)
+
+Builds a historical point-in-time ERP series for the Lean backtest, so the correct ERP is used at each rebalance date with no look-ahead bias.
+
+```powershell
+# Step 1: Download Damodaran archive files (2001-2025 .xls + 2026 .xlsx)
+python scripts/download_damodaran_erp.py --dry-run   # preview links
+python scripts/download_damodaran_erp.py             # download
+
+# Step 2: Extract all files into per-period JSONs
+python scripts/extract_all_damodaran_erp.py
+
+# Step 3: Build Lean-compatible PIT history (US + mature-market ERP only)
+python scripts/build_lean_erp_history.py
+
+# Step 4: Embed into Lean Python module
+cd lean_project && python scripts/embed_data.py
 ```
 
-## Tratamento de erros
+**Data locations:**
+- Downloaded `.xls`/`.xlsx` files → `implied_erp/data/raw/` (gitignored)
+- Per-period extracted JSONs → `implied_erp/data/erp/erp_*.json`
+- Lean PIT history → `lean_project/data/damodaran_erp_history.json`
 
-- **Arquivo não encontrado**: Se o caminho para `--xlsx` não existir, gera `FileNotFoundError` com a mensagem "Arquivo não encontrado: [caminho]"
-- **Aba não encontrada**: Se a aba "ERPs by country" não estiver presente, informa os nomes das abas disponíveis para facilitar a identificação
-- **Dados ausentes**: Se nenhum país é encontrado após o parsing, gera `ValueError` indicando que nenhum país foi encontrado
-- **Valores inválidos**: "NA", "N/A", "#N/A" ou células vazias são convertidos para `null` no JSON
+### Helper (`helper.py`)
 
-## Constantes editáveis
+Utility for fetching index-level data via yfinance. Used by other modules in the pipeline.
 
-Se a estrutura da planilha mudar no futuro, as constantes no topo do script podem ser ajustadas:
+## Dependencies
 
-| Constante | Valor default | Descrição |
-|-----------|--------------|-----------|
-| `SHEET_NAME` | `"ERPs by country"` | Nome da aba a ser processada |
-| `COUNTRY_COL` | `0` | Índice da coluna com nomes dos países |
-| `DATA_START_ROW` | `9` | Primeira linha de dados (Excel row) |
-| `METADATA_MAX_ROW` | `7` | Última linha de metadados (Excel row) |
-| `REGULAR_FIELDS` | `(8 campos)` | Mapeamento coluna → field name para países regulares |
-| `FRONTIER_FIELDS` | `(4 campos)` | Mapeamento coluna → field name para fronteiriços |
-
-## Dependências
-
-- **openpyxl**: Leitura de arquivos Excel .xlsx
-
-Instalado no ambiente virtual do projeto.
-
-## Fonte de dados
-
-Os dados são extraídos da planilha do **Damodaran** (NYU Stern):
-
-https://pages.stern.nyu.edu/~adamodar/
+- **openpyxl** — Excel file processing (`.xlsx`)
+- **xlrd** — Legacy Excel file processing (`.xls` archive files)
+- **requests** — HTTP download for archive files
