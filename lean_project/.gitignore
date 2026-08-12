@@ -1,0 +1,17 @@
+bin/
+obj/
+*.user
+*.suo
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.swp
+.DS_Store
+Thumbs.db
+results/
+*.log
+backtests/
+.QuantConnect/
+
+

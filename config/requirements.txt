@@ -1,0 +1,10 @@
+matplotlib
+yfinance
+pandas
+openpyxl
+xlrd>=2.0.1
+numpy
+fredapi
+python-dotenv
+requests
+edgar

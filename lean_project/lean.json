@@ -1,0 +1,23 @@
+{
+    "algorithm-type-name": "PbRoeAtrAlgorithm",
+    "algorithm-script-name": "main.py",
+    "algorithm-language": "Python",
+    "algorithm-location": "main.py",
+    "live-mode": false,
+    "live-mode-brokerage": "InteractiveBrokers",
+    "live-mode-account-type": "Margin",
+    "live-mode-cash": 100000,
+    "start-date": "2020-01-01",
+    "end-date": "2026-08-01",
+    "security-price-age": 30,
+    "forward-window": "00:00",
+    "backtesting-data-folder": "data",
+    "data-folder": "data",
+    "data-provider": "QuantConnect.Lean.Engine.DataFeeds.DefaultDataProvider",
+    "live-mode-delay": 300,
+    "version": 2,
+    "job-organization-id": "e485873065962a47b4eba742d12c6ee3",
+    "organization-id": "e485873065962a47b4eba742d12c6ee3",
+    "file-database-last-update": "08/10/2026 08:08:19",
+    "id": "Local"
+}
