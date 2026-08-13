@@ -118,17 +118,22 @@ If you need to refresh the embedded data (recommended quarterly since `book_valu
 # 1. Download quarterly PIT fundamentals from SEC filings (edgartools)
 python scripts/download_edgartools_data.py
 
-# 2. Download fresh equity bars from yfinance (full S&P 500 list + ^GSPC)
+# 2. Download + repair equity bars (full S&P 500 list + ^GSPC + ^TNX)
 python scripts/download_equity_data.py
+python scripts/repair_equity_data.py           # retry throttled/masked tickers
+python scripts/fetch_missing_delisted.py       # dry-run: review the plan
+python scripts/fetch_missing_delisted.py --apply  # recover rename/Tiingo gaps
+python scripts/track_exclusions.py            # generate coverage + exclusion report
 
-# 3. Convert to QC zip format (for bootstrap)
-python scripts/convert_to_qc_format.py
-
-# 4. Embed everything into Python modules
+# 3. Embed everything into Python modules (hard-fails on missing current members)
 python scripts/embed_data.py
 ```
 
-After step 4, commit the regenerated `data/*_json.py`, `data/*_bars.py`, `data/fundamentals_history.py`, and `data/damodaran_erp_history.py` files.
+After step 3, commit the regenerated `data/*_json.py`, `data/*_bars.py`, `data/fundamentals_history.py`, and `data/damodaran_erp_history.py` files.
+
+> **Full pipeline documentation** — see [`docs/equity-data-pipeline.md`](../docs/equity-data-pipeline.md)
+> for the step-by-step guide, failure classification table, and recovery
+> scenarios for throttled/broken tickers.
 
 ### ERP Pipeline (Damodaran Equity Risk Premium)
 
