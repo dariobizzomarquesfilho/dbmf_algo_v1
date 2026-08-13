@@ -38,23 +38,47 @@ except ImportError:
     _load_erp_history = _load_erp_history_fallback
 
 
-FINANCIAL_SECTORS = {
-    "financial services",
-    "banks",
-    "insurance",
-    "asset management",
-    "capital markets",
-    "finance",
-    "real estate",
-    "reit",
+# Precise, yfinance-independent financial classification (uses edgar's native
+# classification stored in each snapshot). No keyword/string fallback: a ticker
+# that cannot be grouped by these exact standards is treated as non-financial
+# rather than mis-classified, which would otherwise surface as a bogus
+# Gordon-growth P/B valuation downstream.
+FINANCIAL_CATEGORIES = {
+    "Bank",
+    "Insurance Company",
+    "BDC",
+    "Investment Manager",
+    "REIT",
 }
+# SIC ranges: banks 6021-6036, insurance 6311-6371, investment managers 6211/6282,
+# real estate (incl. REIT 6798) 6500-6799.
+FINANCIAL_SIC_BANK = range(6021, 6037)
+FINANCIAL_SIC_INSURANCE = range(6311, 6372)
+FINANCIAL_SIC_INVESTMENT_MANAGER = {6211, 6282}
+FINANCIAL_SIC_REAL_ESTATE = range(6500, 6800)
 
 
-def is_financial(sector: str, industry: str) -> bool:
-    """Check if a ticker's sector/industry indicates a financial firm."""
-    combined = f"{sector or ''} {industry or ''}".lower()
-    for keyword in FINANCIAL_SECTORS:
-        if keyword in combined:
+def is_financial(
+    sic: Optional[int] = None,
+    business_category: Optional[str] = None,
+) -> bool:
+    """Check if a ticker is a financial firm.
+
+    Classification uses edgar's native signals stored in each snapshot:
+    ``business_category`` and ``sic``.  There is deliberately no sector/
+    industry keyword fallback — if a company cannot be classified by these
+    exact standards it is left as non-financial rather than risked into a
+    bogus valuation.
+    """
+    if business_category in FINANCIAL_CATEGORIES:
+        return True
+    if sic is not None:
+        if (
+            sic in FINANCIAL_SIC_BANK
+            or sic in FINANCIAL_SIC_INSURANCE
+            or sic in FINANCIAL_SIC_INVESTMENT_MANAGER
+            or sic in FINANCIAL_SIC_REAL_ESTATE
+        ):
             return True
     return False
 
@@ -161,10 +185,10 @@ def run_fine_selection(
             roe = snap.get("roe")
             eps = snap.get("eps")
 
-            # Skip financials
-            sector = snap.get("sector") or ""
-            industry = snap.get("industry") or ""
-            if is_financial(sector, industry):
+            # Skip financials (native edgar classification only)
+            sic = snap.get("sic")
+            business_category = snap.get("business_category")
+            if is_financial(sic=sic, business_category=business_category):
                 continue
 
             beta_res = rolling_beta(ticker_bars, market_bars, as_of)

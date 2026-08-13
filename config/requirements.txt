@@ -7,4 +7,4 @@ numpy
 fredapi
 python-dotenv
 requests
-edgar
+edgartools==5.45.1

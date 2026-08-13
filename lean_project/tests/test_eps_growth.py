@@ -119,9 +119,9 @@ def test_parent_equity_primary():
     assert get_parent_equity(None, _make_fin(equity=50.0)) == 50.0
 
 
-def test_parent_equity_fallback():
-    """incl=100, minority=10 → parent=90."""
-    assert get_parent_equity(None, _make_fin(incl=100.0, minority=10.0)) == 90.0
+def test_parent_equity_none_when_primary_missing():
+    """Primary equity unavailable → None (no fabricated noncontrolling fallback)."""
+    assert get_parent_equity(None, _make_fin(incl=100.0, minority=10.0)) is None
 
 
 def test_parent_equity_none_when_both_missing():
