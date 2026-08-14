@@ -30,7 +30,10 @@ CURRENT_2026 = [
     ("ctrypremJuly26.xlsx", BASE_PC + "datasets/ctrypremJuly26.xlsx"),
 ]
 
-# Archive files: ctryprem00.xls (year 2000) through ctryprem25.xls (year 2025)
+# Archive files: ctryprem00.xls (year 2001) through ctryprem25.xls (year 2026).
+# The NN is an OFFSET FROM 2001: ctryprem00.xls is the 2001 ERP (published
+# Jan 1 2001, used during 2001). Its embedded 'Date of update' cell is only the
+# in-year publication date and is ignored for anchoring.
 def _archive_targets() -> list[tuple[str, str]]:
     """Generate (basename, url) for all archive .xls files."""
     return [

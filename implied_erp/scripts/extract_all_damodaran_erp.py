@@ -40,15 +40,19 @@ def _date_key_from_filename(basename: str) -> str | None:
     """Derive a YYYY-MM-DD date key from a Damodaran filename.
 
     Patterns handled:
-      ctryprem00.xls  → 2000-01-01
-      ctryprem25.xls  → 2025-01-01
+      ctryprem00.xls  → 2001-01-01
+      ctryprem24.xls  → 2025-01-01
       ctryprem.xlsx   → None (no year in name; use updated cell)
       ctrypremApr26.xlsx → 2026-04-01
       ctrypremJuly26.xlsx → 2026-07-01
     """
     stem = Path(basename).stem
 
-    # ctrypremNN.xls → year 2001 + NN (ctryprem00.xls = 2001, ctryprem24.xls = 2025)
+    # ctrypremNN.xls → year 2001 + NN.  The NN is an OFFSET FROM 2001: the file
+    # published on Jan 1 of (2001+NN) and is used during that year.  So
+    # ctryprem00.xls = 2001, ctryprem24.xls = 2025.  The embedded 'Date of
+    # update' cell is only the in-year publication date and is NOT used for
+    # anchoring (see _resolve_date).
     m = re.match(r"ctryprem(\d{2})\.xls", basename, re.IGNORECASE)
     if m:
         year = 2001 + int(m.group(1))
@@ -70,23 +74,34 @@ def _date_key_from_filename(basename: str) -> str | None:
 def _resolve_date(raw_path: Path, erp_data: dict) -> str:
     """Resolve a date key for a raw file.
 
-    Priority: 1) parsed `updated` cell, 2) filename fallback, 3) file mtime.
+    Anchoring model (per Damodaran's publication convention):
+      - ctrypremNN.xls  → use the filename year 2000 + NN.  This file IS the
+        year-NN ERP; its embedded 'Date of update' cell is only the in-year
+        publication date and must NOT be used for anchoring.
+      - ctrypremMMMYY.xlsx (mid-year updates) → use the embedded 'Date of
+        update' cell (the real update date), falling back to the filename
+        month map.  These are left untouched / anchored at their true date.
+      - ctryprem.xlsx (current year) → no year in name; use the embedded cell.
+      - last resort: file mtime.
     """
-    # 1) Try the cell's updated date
+    fb = _date_key_from_filename(raw_path.name)
+    # Archive .xls: the filename year is authoritative — ignore the embedded cell.
+    if fb and raw_path.suffix.lower() == ".xls":
+        return fb
+
+    # Otherwise (any .xlsx) prefer the embedded 'Date of update' cell.
     updated = erp_data.get("updated")
     if updated:
-        # openpyxl may return "2026-07-09 00:00:00"; take the date part
-        if " " in updated:
+        if " " in updated:  # openpyxl "2026-07-09 00:00:00"
             updated = updated.split(" ")[0]
         if len(updated) == 10 and updated[4] == "-" and updated[7] == "-":
             return updated
 
-    # 2) Try filename-based fallback
-    fb = _date_key_from_filename(raw_path.name)
+    # Filename fallback (covers ctrypremMMMYY.xlsx when the cell is missing).
     if fb:
         return fb
 
-    # 3) Last resort: file mtime as YYYY-MM-DD
+    # Last resort: file mtime as YYYY-MM-DD
     mtime = raw_path.stat().st_mtime
     from datetime import datetime, timezone
 
@@ -227,9 +242,17 @@ def main() -> None:
     for f in sorted(erp_dir.glob("erp_*.json")):
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
+            # The JSON filename (erp_YYYY-MM-DD.json) already encodes the
+            # resolved date — use it directly.  _resolve_date is for RAW files
+            # and would fall back to mtime here (wrong for .xls archives).
+            stem = f.stem
+            if stem.startswith("erp_"):
+                date_key = stem[len("erp_"):]
+            else:
+                date_key = _resolve_date(f, d)
             entries.append(
                 {
-                    "date": _resolve_date(f, d),
+                    "date": date_key,
                     "path": f.name,
                     "source": d.get("source"),
                     "countries": len(d.get("countries", {})),

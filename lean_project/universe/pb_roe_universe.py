@@ -26,6 +26,7 @@ from universe.pit_data import (
     rolling_beta,
     erp_as_of,
     earliest_erp,
+    resolve_erp_as_of,
 )
 
 # Load PIT ERP history if available (embedded damodaran_erp_history.py)
@@ -36,6 +37,15 @@ try:
     from data.damodaran_erp_history import load_damodaran_erp_history as _load_erp_history
 except ImportError:
     _load_erp_history = _load_erp_history_fallback
+
+# Fallback US implied-ERP history (annual, from histimpl.html)
+def _load_histimpl_erp_fallback() -> dict:
+    return {}
+
+try:
+    from data.damodaran_erp_history_us import load_damodaran_erp_history_us as _load_histimpl_erp
+except ImportError:
+    _load_histimpl_erp = _load_histimpl_erp_fallback
 
 
 # Precise, yfinance-independent financial classification (uses edgar's native
@@ -139,6 +149,7 @@ def run_fine_selection(
         bars_cache = load_bars_cache_from_data()
     if erp_history_cache is None:
         erp_history_cache = _load_erp_history()
+    histimpl_cache = _load_histimpl_erp()
 
     as_of = algorithm.Time.strftime("%Y-%m-%d")
 
@@ -151,16 +162,17 @@ def run_fine_selection(
 
     erp = get_erp(erp_cache, "United States")
 
-    # PIT ERP whenever the history exists (overrides static snapshot)
-    if erp_history_cache:
-        entry = erp_as_of(erp_history_cache, as_of) or earliest_erp(
-            erp_history_cache
-        )
+    # PIT ERP whenever the history exists (overrides static snapshot).
+    # Prefer the spreadsheet-derived PIT series; fall back to the annual
+    # histimpl US implied-ERP history when the spreadsheet has no usable entry.
+    if erp_history_cache or histimpl_cache:
+        entry = resolve_erp_as_of(erp_history_cache, histimpl_cache, as_of)
         if entry is not None:
             erp = get_erp(entry, "United States")
+            effective_source = entry.get("source", "pit")
             algorithm.Log(
                 f"DIAG ERP PIT as_of={as_of} erp={erp:.4f} "
-                f"(source={'pit' if entry else 'static'})"
+                f"(source={effective_source})"
             )
 
     # PIT fundamentals require history_cache and market_bars

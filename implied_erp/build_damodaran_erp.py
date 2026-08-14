@@ -2,9 +2,11 @@
 premiums do Damodaran (``ctryprem*.xlsx``).
 
 A planilha é um download pontual do Damodaran e não deve ser dependência de
-runtime. Este script faz a extração *automática* uma única vez: lê a aba
-"ERPs by country", extrai o par país -> "Total Equity Risk Premium" (coluna 5)
-e salva um JSON versionável que o módulo ``src/screener/damodaran.py`` consome.
+runtime. Este script faz a extração *automática* uma única vez e salva um JSON
+versionável que o módulo ``src/screener/damodaran.py`` consome.
+
+Usa o extrator layout-robust de ``implied_erp/extract_damodaran_erp.py`` para
+manter consistência com a extração de arquivos antigos (ctrypremNN.xls).
 
 Rode de novo sempre que o Damodaran publicar uma planilha nova::
 
@@ -16,85 +18,53 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-import openpyxl
-
-# Célula que traz o ERP de um mercado maduro (usado como fallback).
-MATURE_MARKET_LABEL = "Enter the current risk premium for a mature equity market"
-SHEET_NAME = "ERPs by country"
-COUNTRY_COL = 1          # coluna A -> país
-ERP_COL = 5              # coluna E -> "Total Equity Risk Premium"
-HEADER_LABEL = "Country"
-
-# Caminho default da planilha baixada (Downloads do usuário).
-# Repo root = dois níveis acima deste script (scripts/ -> pb_roe/).
+# Repo root = dois níveis acima deste script (implied_erp/ -> repo root).
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from implied_erp.extract_damodaran_erp import extract as _extract_sheet  # noqa: E402
+
 DEFAULT_XLSX = REPO_ROOT / "implied_erp" / "data" / "ctryprem.xlsx"
 DEFAULT_OUT = REPO_ROOT / "implied_erp" / "data" / "damodaran_erp.json"
 
 
-def _to_float(value) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def extract(xlsx_path: str) -> dict:
-    """Lê a planilha e devolve o dicionário de metadados + países."""
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    ws = wb[SHEET_NAME]
+    """Extrai país -> ERP via o extrator robusto compartilhado."""
+    data = _extract_sheet(xlsx_path)
 
-    mature_market_erp: float | None = None
     countries: dict[str, float] = {}
-    in_data = False
-
-    for row in ws.iter_rows(values_only=True):
-        if not row:
-            continue
-        first = row[0]
-
-        # Linha de cabeçalho: marca o início dos dados de país.
-        if first == HEADER_LABEL:
-            in_data = True
-            continue
-
-        # Antes dos dados, captura o ERP de mercado maduro (aparece acima).
-        if not in_data and isinstance(first, str) and MATURE_MARKET_LABEL in first:
-            mature_market_erp = _to_float(row[ERP_COL - 1])
-            continue
-
-        if not in_data:
-            continue
-
-        # Linhas de dados: país na coluna 1, ERP na coluna 5.
-        country = first
-        if not isinstance(country, str) or not country.strip():
-            continue
-        erp = _to_float(row[ERP_COL - 1] if len(row) >= ERP_COL else None)
+    for name, entry in data.get("countries", {}).items():
+        erp = entry.get("total_equity_risk_premium2") or entry.get("total_equity_risk_premium")
         if erp is None:
             continue
-        countries[country.strip()] = erp
+        countries[name] = float(erp)
 
     if not countries:
-        raise ValueError(f"Nenhum país encontrado na aba '{SHEET_NAME}' de {xlsx_path}")
+        raise ValueError(f"Nenhum país encontrado em {xlsx_path}")
 
     return {
-        "source": Path(xlsx_path).name,
-        "updated": Path(xlsx_path).stem,
-        "mature_market_erp": mature_market_erp if mature_market_erp is not None else 0.042,
+        "source": data.get("source"),
+        "updated": data.get("updated"),
+        "mature_market_erp": data.get("mature_market_erp")
+        if data.get("mature_market_erp") is not None else 0.042,
         "countries": countries,
     }
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Gera o JSON de ERP do Damodaran.")
-    ap.add_argument("--xlsx", default=DEFAULT_XLSX, help="Caminho da planilha ctryprem*.xlsx")
+    ap.add_argument("--xlsx", default=str(DEFAULT_XLSX), help="Caminho da planilha ctryprem*.xlsx")
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="Caminho do JSON de saída")
+    ap.add_argument("--report", action="store_true", help="Imprimir relatório de layout")
     args = ap.parse_args()
 
     data = extract(args.xlsx)
+    if args.report:
+        from implied_erp.extract_damodaran_erp import build_layout_report
+        print(build_layout_report(_extract_sheet(args.xlsx)), file=sys.stderr)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

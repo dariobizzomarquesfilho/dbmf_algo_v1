@@ -74,3 +74,54 @@ def earliest_erp(history: dict) -> Optional[dict]:
     if not hist:
         return None
     return hist[min(hist)]
+
+
+def histimpl_erp_as_of(histimpl_hist: dict, date_str: str) -> Optional[dict]:
+    """Latest US implied-ERP (histimpl) entry with date key < date_str (strict).
+
+    Annual values are keyed YYYY-01-01, so strict less-than returns year Y's
+    value for any as_of in (Y-01-01, Y+1-01-01) — the "published January, used
+    whole year" convention.  Returns a normalized entry with ``source`` tag.
+    """
+    hist = histimpl_hist.get("us_erp_history", {}) if histimpl_hist else {}
+    ds = [d for d in hist if d < date_str]
+    if not ds:
+        return None
+    us_erp = hist[max(ds)]
+    return {
+        "us_erp": us_erp,
+        "mature_market_erp": us_erp,  # US is the mature-market proxy
+        "source": "histimpl",
+    }
+
+
+def resolve_erp_as_of(
+    spreadsheet_hist: dict,
+    histimpl_hist: dict,
+    date_str: str,
+) -> Optional[dict]:
+    """Resolve the ERP entry for ``date_str``, preferring spreadsheet PIT data.
+
+    Returns the spreadsheet entry via ``erp_as_of``/``earliest_erp``.  Falls
+    back to ``histimpl_erp_as_of`` only when the spreadsheet entry is missing or
+    has no usable ``us_erp``.  Always returns an entry with a ``source`` tag
+    (``"pit"`` or ``"histimpl-fallback"``) so callers can log the effective source.
+    """
+    pit = erp_as_of(spreadsheet_hist, date_str) or earliest_erp(spreadsheet_hist)
+    if pit is not None and isinstance(pit.get("us_erp"), (int, float)):
+        return {"us_erp": pit["us_erp"],
+                "mature_market_erp": pit.get("mature_market_erp"),
+                "source": "pit"}
+
+    hi = histimpl_erp_as_of(histimpl_hist, date_str)
+    if hi is not None:
+        hi = dict(hi)
+        hi["source"] = "histimpl-fallback"
+        return hi
+
+    # Spreadsheet entry exists but lacks us_erp; still expose it if present.
+    if pit is not None:
+        return {"us_erp": pit.get("us_erp"),
+                "mature_market_erp": pit.get("mature_market_erp"),
+                "source": "pit"}
+    return None

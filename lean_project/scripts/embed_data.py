@@ -276,3 +276,16 @@ if __name__ == "__main__":
         )
     else:
         print("Skip damodaran_erp_history.json (not yet built)")
+
+    # US implied-ERP history fallback (annual, from histimpl.html).
+    # Source JSON is produced by implied_erp/scripts/scrape_histimpl.py into
+    # implied_erp/data/ (gitignored); embed it from there.
+    _implied_erp_json = Path(__file__).resolve().parent.parent.parent / "implied_erp" / "data" / "histimpl_us_erp.json"
+    if _implied_erp_json.exists():
+        embed_json(
+            str(_implied_erp_json),
+            "DAMODARAN_ERP_HISTORY_US",
+            str(base / "damodaran_erp_history_us.py"),
+        )
+    else:
+        print("Skip histimpl_us_erp.json (not yet scraped)")
