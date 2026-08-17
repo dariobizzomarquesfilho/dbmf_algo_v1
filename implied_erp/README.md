@@ -22,22 +22,7 @@ python extract_damodaran_erp.py --xlsx "path/to/ctrypremJuly26.xlsx"
 - **Regular countries:** Moody's rating, default spread, total equity risk premium, country risk premium, sovereign CDS, alternative CDS-based ERPs
 - **Frontier markets:** PRS score, ERP, CRP, default spread (no Moody's rating)
 
-### 2. Lightweight Build (`build_damodaran_erp.py`)
-
-Extracts a minimal country → Total Equity Risk Premium map from the same spreadsheet. Faster and smaller than the full extraction.
-
-**Usage:**
-```bash
-# Default input/output paths
-python build_damodaran_erp.py
-
-# Custom paths
-python build_damodaran_erp.py --xlsx "path/to/ctryprem.xlsx" --out "output.json"
-```
-
-**Default output:** `implied_erp/data/damodaran_erp.json`
-
-### 3. PIT Pipeline Scripts (`scripts/`)
+### 2. PIT Pipeline Scripts (`scripts/`)
 
 Builds a historical point-in-time ERP series for the Lean backtest, so the correct ERP is used at each rebalance date with no look-ahead bias.
 
@@ -57,9 +42,9 @@ cd lean_project && python scripts/embed_data.py
 ```
 
 **Data locations:**
-- Downloaded `.xls`/`.xlsx` files → `implied_erp/data/raw/` (gitignored)
-- Per-period extracted JSONs → `implied_erp/data/erp/erp_*.json`
-- Lean PIT history → `lean_project/data/damodaran_erp_history.json`
+- Downloaded `.xls`/`.xlsx` files -> `implied_erp/data/raw/` (gitignored)
+- Per-period extracted JSONs -> `implied_erp/data/erp/erp_*.json`
+- Lean PIT history -> `lean_project/data/damodaran_erp_history.json`
 
 ### Helper (`helper.py`)
 

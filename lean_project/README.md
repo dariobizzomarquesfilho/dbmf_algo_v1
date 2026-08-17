@@ -8,7 +8,6 @@ QuantConnect Lean backtest for the DBMF Quant strategy. Screens S&P 500 constitu
 Embedded data (zlib+base64)
     │
     ├── equity_bars.py            → 502 tickers + ^GSPC + ^TNX × 751 daily bars
-    ├── damodaran_erp_json.py     → 175+ countries ERP (static snapshot)
     ├── damodaran_erp_history.py  → US ERP PIT series (2001-2026, per-date lookup)
     └── fundamentals_history.py   → per-company quarterly PIT book_value / roe / eps / g_eps
     │
@@ -44,12 +43,9 @@ lean_project/
 ├── lean.json                # Lean v2 config
 ├── data/
 │   ├── equity_bars.py            # Embedded daily equity bars (auto-generated)
-│   ├── damodaran_erp_json.py     # Embedded ERP data (auto-generated)
 │   ├── fundamentals_history.py   # Embedded quarterly PIT history (auto-generated)
-│   ├── damodaran_erp.py         # DamodaranERP PythonData feed
 │   ├── bootstrap_data.py        # Writes CSV.zip to Lean data folder
 │   ├── equity_bars.json         # Source bars data (for regeneration)
-│   ├── damodaran_erp.json       # Source ERP data
 │   ├── fundamentals_history.json # Source quarterly PIT history (TTM per quarter, edgartools)
 │   ├── equity/                   # Lean equity .zip files (daily bars)
 │   └── alternative/
@@ -99,11 +95,6 @@ Writes embedded equity bars as CSV.zip files into Lean's data folder. At runtime
 
 ### `data/embed_data.py`
 Build script that converts JSON data files to embedded Python modules using zlib compression + base64 encoding. Run after updating any source JSON file.
-
-### `data/damodaran_erp.py`
-DamodaranERP PythonData feed. Handles both old and new cache structures:
-- New: top-level `us_erp` key + `countries` sub-dict with `total_equity_risk_premium`
-- Old: top-level country keys with `Equity Risk Premium`
 
 ### `universe/pb_roe_universe.py`
 Fine selection logic. Uses embedded data only (no file I/O, no QC paid feeds).

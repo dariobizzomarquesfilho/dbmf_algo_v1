@@ -1,8 +1,8 @@
 """Build script: converts JSON data files to embedded Python modules.
 
-Generates data/damodaran_erp.py, data/equity_bars.py, data/fundamentals.py,
-data/backtest_config.py, and updates lean.json as self-contained modules
-with no external JSON file deps.
+Generates data/equity_bars.py, data/fundamentals_history.py,
+data/damodaran_erp_history.py, data/backtest_config.py, and updates lean.json
+as self-contained modules with no external JSON file deps.
 """
 from __future__ import annotations
 
@@ -261,21 +261,23 @@ if __name__ == "__main__":
     embed_json(str(base / "equity_bars.json"), "EQUITY_BARS", str(base / "equity_bars.py"))
 
     # Medium files: compress + base64
-    embed_json(str(base / "damodaran_erp.json"), "DAMODARAN_ERP", str(base / "damodaran_erp_json.py"))
     if (base / "fundamentals_history.json").exists():
         embed_json(str(base / "fundamentals_history.json"), "FUNDAMENTALS_HISTORY", str(base / "fundamentals_history.py"))
     else:
         print("Skip fundamentals_history.json (not yet downloaded)")
 
-    # ERP history (PIT series for Lean backtest)
-    if (base / "damodaran_erp_history.json").exists():
-        embed_json(
-            str(base / "damodaran_erp_history.json"),
-            "DAMODARAN_ERP_HISTORY",
-            str(base / "damodaran_erp_history.py"),
+    # ERP history (PIT series for Lean backtest) — REQUIRED (no look-ahead fallback).
+    _erp_hist = base / "damodaran_erp_history.json"
+    if not _erp_hist.exists():
+        sys.exit(
+            f"ERROR: {_erp_hist} not found.\n"
+            f"  Run the Damodaran ERP PIT pipeline first:\n"
+            f"    python implied_erp/scripts/download_damodaran_erp.py\n"
+            f"    python implied_erp/scripts/extract_all_damodaran_erp.py\n"
+            f"    python implied_erp/scripts/build_lean_erp_history.py\n"
+            f"  then re-run python lean_project/scripts/embed_data.py."
         )
-    else:
-        print("Skip damodaran_erp_history.json (not yet built)")
+    embed_json(str(_erp_hist), "DAMODARAN_ERP_HISTORY", str(base / "damodaran_erp_history.py"))
 
     # US implied-ERP history fallback (annual, from histimpl.html).
     # Source JSON is produced by implied_erp/scripts/scrape_histimpl.py into

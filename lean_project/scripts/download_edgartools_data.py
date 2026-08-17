@@ -54,7 +54,6 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 
 import yfinance as yf
-from edgar import Company
 
 # Add repo root to path so `import config` works (config/ is at repo root)
 _repo_root = Path(__file__).resolve().parent.parent.parent
@@ -66,7 +65,11 @@ _lean_project = Path(__file__).resolve().parent.parent
 if str(_lean_project) not in sys.path:
     sys.path.insert(0, str(_lean_project))
 
-import config  # loads .env and sets edgar identity
+# Single source of truth for SEC identity: importing config sets edgar identity.
+# Imported before `from edgar import Company` so identity is guaranteed set
+# before any edgar network call.
+import config
+from edgar import Company
 from data.sp500_data import load_sp500_membership
 
 REQUEST_DELAY = 0.5

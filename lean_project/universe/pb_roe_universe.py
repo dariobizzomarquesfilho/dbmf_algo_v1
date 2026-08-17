@@ -1,7 +1,8 @@
 """Fine fundamental universe selection for P/B vs ROE strategy.
 
-Uses local fundamental data from data/fundamentals.json instead of QC's
-paid Morningstar FineFundamental feed.
+Uses local fundamental data from data/fundamentals_history.json (produced by
+scripts/download_edgartools_data.py) instead of QC's paid Morningstar
+FineFundamental feed.
 
 Screening pipeline:
 1. Exclude financials (by sector keyword matching)
@@ -18,8 +19,17 @@ from typing import Optional
 from AlgorithmImports import *
 from valuation.gordon_growth import intrinsic_pb_2stage
 
-from data.damodaran_erp_json import load_damodaran_erp as load_erp_cache_from_data
-from data.equity_bars import load_equity_bars as load_bars_cache_from_data
+# Core required data modules. A missing embed would otherwise fail later with a
+# raw ModuleNotFoundError deep inside the backtest. Re-raise an actionable error
+# instead of falling back to {} (a silent empty cache would empty the whole
+# portfolio with no diagnostic).
+try:
+    from data.equity_bars import load_equity_bars as load_bars_cache_from_data
+except ImportError as _e:
+    raise RuntimeError(
+        "data module 'equity_bars' is missing — run "
+        "lean_project/scripts/embed_data.py before backtesting"
+    ) from _e
 from universe.pit_data import (
     fundamental_as_of,
     latest_price_as_of,
@@ -128,7 +138,6 @@ def run_fine_selection(
     algorithm: QCAlgorithm,
     tickers: list,
     max_positions: int = 10,
-    erp_cache: Optional[dict] = None,
     bars_cache: Optional[dict] = None,
     history_cache: Optional[dict] = None,
     market_bars: Optional[dict] = None,
@@ -143,8 +152,6 @@ def run_fine_selection(
     backtest date (PIT, no look-ahead) whenever ``erp_history_cache``
     and/or ``bars_cache`` are available.
     """
-    if erp_cache is None:
-        erp_cache = load_erp_cache_from_data()
     if bars_cache is None:
         bars_cache = load_bars_cache_from_data()
     if erp_history_cache is None:
@@ -160,20 +167,25 @@ def run_fine_selection(
         tn_close = get_tnx_rate(bars_cache)  # global latest fallback
     rf = tn_close / 100.0 if tn_close and tn_close > 0 else 0.042
 
-    erp = get_erp(erp_cache, "United States")
-
-    # PIT ERP whenever the history exists (overrides static snapshot).
-    # Prefer the spreadsheet-derived PIT series; fall back to the annual
-    # histimpl US implied-ERP history when the spreadsheet has no usable entry.
+    # PIT ERP is the sole, authoritative source of truth. There is NO fallback
+    # to a current/latest snapshot (that would be look-ahead bias). If neither
+    # the PIT spreadsheet series nor the histimpl series yields an entry, we
+    # refuse (empty screen) instead of pricing with a future ERP.
+    entry = None
     if erp_history_cache or histimpl_cache:
         entry = resolve_erp_as_of(erp_history_cache, histimpl_cache, as_of)
-        if entry is not None:
-            erp = get_erp(entry, "United States")
-            effective_source = entry.get("source", "pit")
-            algorithm.Log(
-                f"DIAG ERP PIT as_of={as_of} erp={erp:.4f} "
-                f"(source={effective_source})"
-            )
+    if entry is None:
+        algorithm.Log(
+            f"ERROR: No PIT ERP available as_of={as_of} "
+            f"(PIT history and histimpl both empty) — refusing look-ahead "
+            f"snapshot. Skipping screen for this date."
+        )
+        return []
+    erp = get_erp(entry, "United States")
+    effective_source = entry.get("source", "pit")
+    algorithm.Log(
+        f"DIAG ERP PIT as_of={as_of} erp={erp:.4f} (source={effective_source})"
+    )
 
     # PIT fundamentals require history_cache and market_bars
     if not history_cache or not market_bars:

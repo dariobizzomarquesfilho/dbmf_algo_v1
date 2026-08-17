@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from pathlib import Path
 
 from scripts.embed_data import embed_json
 

@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import data.sp500_data as _sp500_mod
 from data.sp500_data import (
     load_sp500_membership,
     clip_to_membership,
@@ -27,12 +29,16 @@ from data.corporate_actions import (
     corporate_action_exits,
 )
 
+# Resolve the membership CSV relative to the imported `data.sp500_data` module so
+# the path is cwd-independent (the file is at lean_project/data/, not repo-root data/).
+_SP500_CSV = str(Path(_sp500_mod.__file__).parent / "sp500_ticker_start_end.csv")
+
 
 # ---------------------------------------------------------------------------
 # clip_to_membership
 # ---------------------------------------------------------------------------
 def test_clip_to_membership_multi_interval():
-    mem = load_sp500_membership("data/sp500_ticker_start_end.csv")
+    mem = load_sp500_membership(_SP500_CSV)
     bars = {
         "AAL": {
             "1996-01-02": {}, "1996-06-01": {}, "1997-02-01": {},
@@ -46,7 +52,7 @@ def test_clip_to_membership_multi_interval():
 
 
 def test_clip_to_membership_renames_and_indices():
-    mem = load_sp500_membership("data/sp500_ticker_start_end.csv")
+    mem = load_sp500_membership(_SP500_CSV)
     bars = {
         "CTL": {"2019-01-01": {}, "2020-09-18": {}, "2020-09-19": {}},
         "CTLT": {"2020-09-21": {}, "2021-01-01": {}},
@@ -63,7 +69,7 @@ def test_clip_to_membership_renames_and_indices():
 # build_alias_map
 # ---------------------------------------------------------------------------
 def test_build_alias_map_near_day_successor():
-    mem = load_sp500_membership("data/sp500_ticker_start_end.csv")
+    mem = load_sp500_membership(_SP500_CSV)
     aliases = build_alias_map(mem)
     assert aliases.get("CTL") == "LUMN"
     assert aliases.get("COG") == "CTRA"

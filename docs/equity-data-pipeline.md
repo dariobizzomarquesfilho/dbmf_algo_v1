@@ -20,12 +20,13 @@ refreshing price data.
 └─────────────────────────────────────────────────────────────┘
          │
          ▼
-Step 1  download_equity_data.py
+Step 1  download_equity_data.py  (bars-ONLY)
          ├── yfinance download: HISTORY_START → BACKTEST_END
          ├── equity_bars.json   (all tickers + ^GSPC + ^TNX)
-         ├── fundamentals.json     (snapshot: P/B, ROE, market cap, etc.)
-         ├── fundamentals_history.json  (quarterly PIT from yfinance)
          └── spares a .bak.json before overwriting
+
+Step 1b download_edgartools_data.py  (sole owner of fundamentals_history.json)
+         └── fundamentals_history.json  (quarterly PIT from SEC EDGAR — rich edgar schema)
          │   Some tickers drop here (Yahoo rate-limits → "empty" return)
          │
          ▼
@@ -64,7 +65,7 @@ Step 4  track_exclusions.py
 Step 5  embed_data.py
          ├── hard-fails if any CURRENT S&P 500 member is missing/out-of-range
          ├── compresses each JSON → zlib + base64 Python module
-         ├── writes equity_bars.py, damodaran_erp_json.py, etc.
+          ├── writes equity_bars.py, damodaran_erp_history.py, etc.
          └── updates lean.json start/end dates
          │
          ▼
@@ -109,8 +110,7 @@ all pulled via yfinance with `auto_adjust=True`.
 | File | Description |
 |------|-------------|
 | `equity_bars.json` | `{ticker: {date: {open, high, low, close, volume}}}` — daily OHLCV bars clipped to each ticker's S&P 500 membership interval |
-| `fundamentals.json` | Snapshot fundamentals per ticker (P/B, ROE, EPS, market cap, sector, etc.) |
-| `fundamentals_history.json` | Quarterly PIT history from yfinance (~7 quarters per ticker) |
+| `fundamentals_history.json` | Quarterly PIT history from SEC EDGAR (rich edgar schema: book_value, roe, eps, sic, business_category, g_eps, ...) |
 | `equity_bars.bak.json` | Backup of the previous `equity_bars.json` before overwrite |
 
 **Options:**
@@ -318,7 +318,6 @@ Compresses all JSON data files into self-contained Python modules
 | Source JSON | Embedded Module |
 |-------------|----------------|
 | `equity_bars.json` | `equity_bars.py` → `load_equity_bars()` |
-| `damodaran_erp.json` | `damodaran_erp_json.py` → `load_damodaran_erp()` |
 | `fundamentals_history.json` | `fundamentals_history.py` → `load_fundamentals_history()` |
 | `damodaran_erp_history.json` | `damodaran_erp_history.py` → `load_damodaran_erp_history()` |
 | `config/.env` values | `backtest_config.py` → `load_backtest_window()` |
@@ -437,10 +436,8 @@ Derived values (computed in `config/config.py`):
 | `sp500_ticker_start_end.csv` | (external download) | S&P 500 membership with start/end dates |
 | `equity_bars.json` | `download_equity_data.py` | Source daily OHLCV bars |
 | `equity_bars.py` | `embed_data.py` | Embedded bars (zlib+base64) |
-| `fundamentals.json` | `download_equity_data.py` | Latest fundamentals snapshot |
-| `fundamentals_history.json` | `download_edgartools_data.py` / yfinance | Quarterly PIT history |
+| `fundamentals_history.json` | `download_edgartools_data.py` | Quarterly PIT history (SEC EDGAR) |
 | `fundamentals_history.py` | `embed_data.py` | Embedded quarterlies |
-| `damodaran_erp.json` | `implied_erp/` pipeline | Country-level ERP |
 | `damodaran_erp_history.json` | `implied_erp/` pipeline | PIT ERP history |
 | `equity_unavailable.json` | `fetch_missing_delisted.py` | Tracked survivorship gaps |
 | `equity_bars.throttled.txt` | `repair_equity_data.py` | Throttled ticker list |

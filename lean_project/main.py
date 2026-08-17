@@ -16,7 +16,6 @@ from datetime import date, timedelta
 from typing import Optional
 
 from AlgorithmImports import *
-from data.damodaran_erp import DamodaranERP
 from data.sp500_data import load_sp500_membership
 from data.corporate_actions import corporate_action_exits
 from universe.pb_roe_universe import run_fine_selection
@@ -38,7 +37,13 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self.cooldown_days = 30
 
         # Load backtest window from single source of truth (config/.env → embedded)
-        from data.backtest_config import load_backtest_window
+        try:
+            from data.backtest_config import load_backtest_window
+        except ImportError as _e:
+            raise RuntimeError(
+                "data module 'backtest_config' is missing — run "
+                "lean_project/scripts/embed_data.py before backtesting"
+            ) from _e
         window = load_backtest_window()
         start_y, start_m, start_d = map(int, window["start"].split("-"))
         end_y, end_m, end_d = map(int, window["end"].split("-"))
@@ -46,7 +51,6 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self.SetEndDate(end_y, end_m, end_d)
 
         # Load all data from embedded modules (no disk I/O, Docker-safe)
-        self.erp_cache = DamodaranERP.load_cache()
         self.bars_cache = load_equity_bars()
         try:
             from data.fundamentals_history import load_fundamentals_history
@@ -185,7 +189,6 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             algorithm=self,
             tickers=tickers,
             max_positions=self.max_positions,
-            erp_cache=self.erp_cache,
             bars_cache=self.bars_cache,
             history_cache=self.fundamentals_history,
             market_bars=self.market_bars,
@@ -251,7 +254,6 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                     algorithm=self,
                     tickers=list(self.fundamentals_history.keys()),
                     max_positions=self.max_positions,
-                    erp_cache=self.erp_cache,
                     bars_cache=self.bars_cache,
                     history_cache=self.fundamentals_history,
                     market_bars=self.market_bars,

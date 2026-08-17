@@ -1,15 +1,17 @@
-"""Pre-download S&P 500 equity data from yfinance for Lean backtesting.
+"""Pre-download S&P 500 daily equity bars from yfinance for Lean backtesting.
 
 Downloads:
 1. Daily OHLCV bars (config.DATA_START warm-up window to config.BACKTEST_END)
    → data/equity_bars.json
-2. Snapshot fundamental data per ticker → data/fundamentals.json
-3. Quarterly fundamentals history → data/fundamentals_history.json (yfinance, ~7 quarters)
+
+Fundamentals history is produced separately by
+`lean_project/scripts/download_edgartools_data.py` (rich edgar schema:
+book_value, roe, eps, sic, business_category, g_eps, ...). This script is
+bars-only so that running it can never clobber `fundamentals_history.json`.
 
 Usage:
     python scripts/download_equity_data.py
     python scripts/download_equity_data.py --tickers AAPL MSFT GOOG
-    python scripts/download_equity_data.py --history-only  # only download quarterly history
     python scripts/download_equity_data.py --refresh-sp500  # re-download S&P 500 list
 """
 
@@ -17,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import shutil
 import sys
 from datetime import datetime, timedelta
@@ -213,171 +214,12 @@ def download_daily_bars(tickers: list, output_path: str, membership=None, end_de
         )
 
 
-def download_fundamentals(tickers: list, output_path: str):
-    """Download fundamental snapshot for each ticker and save as JSON."""
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    fundamentals = {}
-    total = len(tickers)
-
-    for i, ticker in enumerate(tickers, 1):
-        if i % 25 == 0:
-            print(f"  Fundamentals {i}/{total} tickers...", file=sys.stderr)
-
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-
-            pb = info.get("priceToBook")
-            roe = info.get("returnOnEquity")
-            eps = info.get("trailingEps")
-            market_cap = info.get("marketCap")
-            dollar_volume = info.get("fiveDayAverageVolume")
-            name = info.get("shortName")
-            sector = info.get("sector")
-            industry = info.get("industry")
-            price = info.get("currentPrice")
-            book_value = info.get("bookValue")
-            revenue = info.get("totalRevenue")
-            net_income = info.get("netIncomeToCommon")
-
-            # Skip if we can't get price
-            if price is None or price <= 0:
-                continue
-
-            # Store tickers even if bookValue/priceToBook are invalid
-            # (yfinance returns negative values for ~33 S&P 500 tickers).
-            # The screening logic will skip these per-screen — they may
-            # have valid bookValue in a future quarter after refresh.
-            # P/B is always computed dynamically as current_price / book_value
-            # at screen time; never from a stale priceToBook snapshot.
-            if pb is None or pb <= 0:
-                if book_value is not None and book_value > 0:
-                    pb = price / book_value
-
-            fundamentals[ticker] = {
-                "name": name,
-                "sector": sector,
-                "industry": industry,
-                "price": price,
-                "book_value": book_value,
-                "pb": pb,
-                "roe": roe,
-                "eps": eps,
-                "market_cap": market_cap,
-                "dollar_volume": dollar_volume,
-                "revenue": revenue,
-                "net_income": net_income,
-            }
-        except Exception as e:
-            print(f"  Warn: {ticker} fundamentals failed: {e}", file=sys.stderr)
-
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(fundamentals, f, indent=2)
-    print(f"Fundamentals saved: {out} ({len(fundamentals)} tickers)")
-
-
-def _row_get(df, col, keys):
-    """Return float value of first matching row key at column ``col``, else None."""
-    for k in keys:
-        if k in df.index:
-            try:
-                return float(df.loc[k, col])
-            except (KeyError, TypeError, ValueError):
-                return None
-    return None
-
-
-def download_fundamentals_history(tickers: list, output_path: str):
-    """Download per-ticker quarterly book_value/roe/eps snapshot series.
-
-    book_value = common stock equity / shares outstanding (per quarter).
-    roe = quarterly net income / common stock equity.
-    eps = diluted EPS (falls back to basic EPS).
-    One entry per quarter-end the ticker reported, so cadence is per-company.
-
-    Note: yfinance only returns the most recent ~7 quarters per ticker.
-    For point-in-time screening covering 2023-2025, ensure the download
-    is run with sufficient historical data available. Re-run periodically
-    as new quarterly reports become available.
-    """
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    hist = {}
-    total = len(tickers)
-
-    for i, ticker in enumerate(tickers, 1):
-        if i % 25 == 0:
-            print(f"  History {i}/{total} tickers...", file=sys.stderr)
-
-        try:
-            stock = yf.Ticker(ticker)
-            bs = stock.quarterly_balance_sheet
-            fin = stock.quarterly_financials
-            if bs is None or bs.empty or fin is None or fin.empty:
-                continue
-            try:
-                shares = stock.get_shares_full()
-            except Exception:
-                shares = None
-
-            quarters = {}
-            for col in bs.columns:
-                date_str = col.strftime("%Y-%m-%d")
-                eq = _row_get(bs, col, ("Common Stock Equity", "Stockholders Equity"))
-                if eq is None:
-                    continue
-
-                book_value = None
-                if shares is not None and not shares.empty:
-                    shares_idx = shares.index.tz_localize(None) if hasattr(shares.index, "tz") and shares.index.tz is not None else shares.index
-                    prior = shares[shares_idx <= col]
-                    if not prior.empty:
-                        book_value = eq / float(prior.iloc[-1])
-
-                roe = None
-                if eq > 0:
-                    ni = _row_get(fin, col, ("Net Income",))
-                    if ni is not None:
-                        roe = ni / eq
-
-                eps = _row_get(fin, col, ("Diluted EPS", "Basic EPS"))
-
-                # Skip entries where all values are missing or NaN
-                def _valid(v):
-                    return v is not None and not (isinstance(v, float) and math.isnan(v))
-
-                if not any(_valid(v) for v in [book_value, roe, eps]):
-                    continue
-                quarters[date_str] = {
-                    "book_value": book_value if _valid(book_value) else None,
-                    "roe": roe if _valid(roe) else None,
-                    "eps": eps if _valid(eps) else None,
-                }
-
-            if quarters:
-                hist[ticker] = quarters
-        except Exception as e:
-            print(f"  Warn: {ticker} history failed: {e}", file=sys.stderr)
-
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(hist, f, indent=2)
-    print(f"Fundamentals history saved: {out} ({len(hist)} tickers)")
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Download S&P 500 equity data for Lean backtesting")
+    parser = argparse.ArgumentParser(description="Download S&P 500 daily equity bars for Lean backtesting")
     parser.add_argument("--tickers", type=str, nargs="+", help="Specific tickers to download")
-    parser.add_argument("--bars-only", action="store_true", help="Only download bars, skip fundamentals")
-    parser.add_argument("--fundamentals-only", action="store_true", help="Only download fundamentals, skip bars")
-    parser.add_argument("--history-only", action="store_true", help="Only download fundamentals history, skip bars and snapshot")
     parser.add_argument("--refresh-sp500", action="store_true", help="Re-download S&P 500 list from GitHub")
     script_dir = Path(__file__).resolve().parent.parent / "data"
     parser.add_argument("--bars-path", type=str, default=str(script_dir / "equity_bars.json"))
-    parser.add_argument("--fundamentals-path", type=str, default=str(script_dir / "fundamentals.json"))
-    parser.add_argument("--history-path", type=str, default=str(script_dir / "fundamentals_history.json"))
     parser.add_argument("--start-date", type=str, default=BACKTEST_START)
     parser.add_argument("--end-date", type=str, default=BACKTEST_END)
     args = parser.parse_args()
@@ -387,23 +229,16 @@ def main():
     seen = set()
     tickers = [x for x in tickers if not (x in seen or seen.add(x))]
 
-    print(f"Downloading data for {len(tickers)} tickers...")
+    print(f"Downloading daily bars for {len(tickers)} tickers...")
     print(f"Period: {BACKTEST_START} to {BACKTEST_END}")
 
     membership = load_sp500_membership(str(_SP500_CSV))
 
-    if not args.fundamentals_only:
-        download_daily_bars(
-            tickers, args.bars_path, membership=membership, end_default=BACKTEST_END
-        )
+    download_daily_bars(
+        tickers, args.bars_path, membership=membership, end_default=BACKTEST_END
+    )
 
-    if not args.bars_only:
-        download_fundamentals(tickers, args.fundamentals_path)
-
-    if args.history_only or (not args.bars_only and not args.fundamentals_only):
-        download_fundamentals_history(tickers, args.history_path)
-
-    print("Done.")
+    print("Done. (Fundamentals history is produced by scripts/download_edgartools_data.py)")
 
 
 if __name__ == "__main__":

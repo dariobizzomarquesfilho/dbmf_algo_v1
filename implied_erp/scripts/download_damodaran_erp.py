@@ -49,7 +49,7 @@ def build_targets(raw_dir: Path) -> list[tuple[str, str, Path]]:
     targets: list[tuple[str, str, Path]] = []
     seen: set[str] = set()
 
-    # Archive .xls files (2000-2025)
+    # Archive .xls files (2001-2026)
     for basename, url in _archive_targets():
         dest = raw_dir / basename
         targets.append((basename, url, dest))

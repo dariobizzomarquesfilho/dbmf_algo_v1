@@ -33,7 +33,6 @@ dbmf_quant_v2/
 │   └── requirements.txt
 ├── implied_erp/                  # Damodaran ERP extraction pipeline
 │   ├── extract_damodaran_erp.py    # Full extraction (.xlsx → structured JSON)
-│   ├── build_damodaran_erp.py      # Lightweight flat extractor
 │   ├── helper.py                   # yfinance index-level fetcher
 │   ├── README.md
 │   ├── scripts/                    # PIT pipeline scripts
@@ -51,16 +50,12 @@ dbmf_quant_v2/
 │   ├── data/
 │   │   ├── equity_bars.py         # Embedded daily equity bars (~790 tickers)
 │   │   ├── equity_bars.json       # Source bars data
-│   │   ├── damodaran_erp_json.py  # Embedded ERP (175+ countries)
-│   │   ├── damodaran_erp.json     # Source ERP data (static snapshot)
 │   │   ├── damodaran_erp_history.py  # Embedded US ERP PIT series
 │   │   ├── damodaran_erp_history.json # Source PIT ERP history
 │   │   ├── fundamentals_history.py # Embedded quarterly PIT fundamentals
-│   │   ├── fundamentals_history.json # Source quarterly PIT history
-│   │   ├── fundamentals.json      # Latest fundamentals snapshot
+│   │   ├── fundamentals_history.json # Source quarterly PIT history (edgartools)
 │   │   ├── backtest_config.py     # Embedded backtest window (from config/.env)
 │   │   ├── bootstrap_data.py      # Writes CSV.zip into Lean data folder
-│   │   ├── damodaran_erp.py       # DamodaranERP PythonData feed
 │   │   ├── sp500_data.py          # S&P 500 PIT membership utilities
 │   │   ├── corporate_actions.py   # Curated S&P 500 spinoffs
 │   │   ├── exclusions.py          # Aggregate excluded tickers
@@ -103,7 +98,6 @@ pip install -r config/requirements.txt
 
 # ── Implied ERP ──
 python implied_erp/extract_damodaran_erp.py --xlsx "path/to/ctrypremJuly26.xlsx" --out "output.json"
-python implied_erp/build_damodaran_erp.py
 
 # ── Damodaran ERP PIT pipeline (for Lean backtest) ──
 python implied_erp/scripts/download_damodaran_erp.py --dry-run   # preview
@@ -132,7 +126,6 @@ python scripts/embed_data.py
 Embedded Python modules (zlib+base64)
     │
     ├── equity_bars.py           → ~790 tickers × ~1,897 daily bars
-    ├── damodaran_erp_json.py    → 175+ countries ERP
     ├── fundamentals_history.py  → quarterly PIT book_value / roe / eps / g_eps
     └── damodaran_erp_history.py → US ERP PIT series (2001-2026)
     │
@@ -155,7 +148,7 @@ PbRoeAtrAlgorithm (main.py)
 - Risk-free rate from ^TNX embedded bars (not from interest-rate.csv)
 - Financial sector excluded via keyword matching on yfinance sector/industry fields
 - Fundamentals use TTM from SEC 10-Q filings (edgartools)
-- PIT quarterly history used when available; falls back to latest snapshot
+- PIT quarterly fundamentals used when available; tickers without quarterly coverage at a date are skipped (no static snapshot fallback — that would be look-ahead bias)
 - Backtest window is single source of truth: `config/.env` → `config/config.py` → `data/backtest_config.py` → `lean.json`
 - S&P 500 membership is point-in-time via `sp500_ticker_start_end.csv`
 
@@ -163,11 +156,10 @@ PbRoeAtrAlgorithm (main.py)
 
 ```
 Damodaran ctryprem*.xlsx  →  extract_damodaran_erp.py  →  output.json
-                              (full extraction: ratings, spreads, CDS, frontier)
-
-ctryprem*.xlsx  →  build_damodaran_erp.py  →  implied_erp/data/damodaran_erp.json
-   (lightweight: country → Total Equity Risk Premium only)
+                               (full extraction: ratings, spreads, CDS, frontier)
 ```
+
+The lightweight static-snapshot path (`build_damodaran_erp.py` → `lean_project/data/damodaran_erp.json`) was removed. The Lean backtest's ERP source of truth is the point-in-time series below.
 
 ### Damodaran ERP PIT Pipeline (for Lean backtest)
 
@@ -185,7 +177,7 @@ damodaran_erp_history.json  →  embed_data.py  →  data/damodaran_erp_history.
                               (embedded as load_damodaran_erp_history())
 ```
 
-At runtime, `pb_roe_universe.py` uses `erp_as_of(erp_history_cache, as_of)` to pick the latest ERP at-or-before the backtest date, falling back to the static snapshot if no PIT entry is available.
+At runtime, `pb_roe_universe.py` resolves the ERP **solely** through the point-in-time history: `resolve_erp_as_of(erp_history_cache, histimpl_cache, as_of)` picks the latest ERP at-or-before the backtest date (preferring the spreadsheet PIT series, falling back to the annual histimpl US series). There is no static "current" snapshot to fall back on — if neither series yields an entry, the screen refuses (returns an empty universe) rather than pricing with a future ERP.
 
 ## Known Issues
 
@@ -201,15 +193,13 @@ At runtime, `pb_roe_universe.py` uses `erp_as_of(erp_history_cache, as_of)` to p
 
 | File | Location | Description |
 |------|----------|-------------|
-| `damodaran_erp.json` | `implied_erp/data/` | Lightweight ERP map (country → Total Equity Risk Premium) |
 | `erp_*.json` | `implied_erp/data/erp/` | Per-period full ERP extractions (2013-2026) |
 | `damodaran_erp_history.json` | `lean_project/data/` | US ERP PIT series (embedded as `damodaran_erp_history.py`) |
 | `equity_bars.json` | `lean_project/data/` | Source equity daily bars (~790 tickers) |
-| `fundamentals.json` | `lean_project/data/` | Latest fundamentals snapshot (TTM from SEC 10-Q) |
-| `fundamentals_history.json` | `lean_project/data/` | Quarterly PIT history (TTM per quarter) |
+| `fundamentals_history.json` | `lean_project/data/` | Quarterly PIT history (TTM per quarter, edgartools) |
 | `sp500_ticker_start_end.csv` | `lean_project/data/` | S&P 500 membership with start/end dates |
 | `ctryprem*.xls/.xlsx` | `implied_erp/data/raw/` (gitignored) | Downloaded Damodaran source files |
-| `ctryprem*.xlsx` | User's Downloads (not in repo) | Source Damodaran spreadsheet |
+| `ctryprem*.xlsx` | `implied_erp/data/raw/` (gitignored, auto-downloaded) | Source Damodaran spreadsheet — auto-downloaded from `https://pages.stern.nyu.edu/~adamodar/pc/datasets/ctryprem.xlsx` by `download_damodaran_erp.py` |
 
 ## Dependencies (added)
 

@@ -20,7 +20,6 @@ dbmf_quant_v2/
 │       └── specs/               # Design specs
 ├── implied_erp/                # Damodaran ERP extraction pipeline
 │   ├── extract_damodaran_erp.py  # Full extraction (.xlsx → structured JSON)
-│   ├── build_damodaran_erp.py    # Lightweight: country → Total Equity Risk Premium
 │   ├── helper.py                 # yfinance index-level fetcher
 │   ├── README.md
 │   ├── data/
@@ -39,16 +38,12 @@ dbmf_quant_v2/
     ├── data/
     │   ├── equity_bars.py      # Embedded daily bars (~790 tickers × ~1,897 bars)
     │   ├── equity_bars.json    # Source bars data (for regeneration)
-    │   ├── damodaran_erp_json.py  # Embedded ERP data (175+ countries)
-    │   ├── damodaran_erp.json    # Source ERP data (static snapshot)
     │   ├── damodaran_erp_history.py  # Embedded US ERP PIT series (2001-2026)
     │   ├── damodaran_erp_history.json  # Source PIT ERP history
     │   ├── fundamentals_history.py  # Embedded quarterly PIT fundamentals (TTM)
-    │   ├── fundamentals_history.json  # Source quarterly PIT history
-    │   ├── fundamentals.json     # Latest fundamentals snapshot
+    │   ├── fundamentals_history.json  # Source quarterly PIT history (edgartools)
     │   ├── backtest_config.py    # Embedded backtest window (from config/.env)
     │   ├── bootstrap_data.py     # Writes CSV.zip files into Lean's data folder
-    │   ├── damodaran_erp.py      # DamodaranERP PythonData feed
     │   ├── sp500_data.py         # S&P 500 PIT membership utilities
     │   ├── corporate_actions.py  # Curated S&P 500 spinoffs
     │   ├── exclusions.py         # Aggregate excluded tickers (broken, missing, throttled)
@@ -105,19 +100,16 @@ The `lean_project/` directory contains the QuantConnect Lean migration of the P/
 - Risk-free rate from ^TNX embedded bars (not from interest-rate.csv)
 - Financial sector excluded via keyword matching on yfinance sector/industry fields
 - Fundamentals use TTM from SEC 10-Q filings (edgartools)
-- PIT quarterly history used when available; falls back to latest snapshot
+- PIT quarterly fundamentals used when available; tickers without quarterly coverage at a date are skipped (no static snapshot fallback — that would be look-ahead bias)
 - Backtest window is single source of truth: `config/.env` → `config/config.py` → `data/backtest_config.py` → `lean.json`
 
 ### Implied ERP
 
-Extracts country-level equity risk premiums from Damodaran's spreadsheet (`ctryprem*.xlsx`).
+Extracts country-level equity risk premiums from Damodaran's spreadsheet (`ctryprem*.xlsx`) into structured JSON. (The former lightweight `build_damodaran_erp.py` static snapshot was removed — the Lean backtest now uses only the point-in-time ERP history described below.)
 
 ```powershell
 # Full extraction (all fields)
 python implied_erp/extract_damodaran_erp.py --xlsx "path/to/ctrypremJuly26.xlsx" --out "output.json"
-
-# Lightweight (country → Total Equity Risk Premium only)
-python implied_erp/build_damodaran_erp.py
 ```
 
 ### Damodaran ERP PIT Pipeline (for Lean backtest)

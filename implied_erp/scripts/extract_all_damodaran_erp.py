@@ -75,7 +75,7 @@ def _resolve_date(raw_path: Path, erp_data: dict) -> str:
     """Resolve a date key for a raw file.
 
     Anchoring model (per Damodaran's publication convention):
-      - ctrypremNN.xls  → use the filename year 2000 + NN.  This file IS the
+      - ctrypremNN.xls  → use the filename year 2001 + NN.  This file IS the
         year-NN ERP; its embedded 'Date of update' cell is only the in-year
         publication date and must NOT be used for anchoring.
       - ctrypremMMMYY.xlsx (mid-year updates) → use the embedded 'Date of
