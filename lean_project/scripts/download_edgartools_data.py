@@ -1,7 +1,11 @@
 """Download S&P 500 quarterly PIT fundamentals from edgartools (SEC filings).
 
-Produces one output file:
-   1. `fundamentals_history.json` — quarterly PIT history (plus ``g_eps``)
+Produces:
+    1. ``fundamentals_history.json`` — quarterly PIT history (plus ``g_eps``)
+    2. ``sp500_cik_map.csv`` — ticker->CIK map (auto-built; curate delisted CIKs)
+    3. ``fundamentals_no_edgar_match.json`` — tickers with no SEC match (delisted
+       without a curated CIK); re-probed each run, recovered when a CIK appears
+       in the map.
 
 TTM rules (applied per quarter for history):
   - Income statement items (revenue, net_income): sum of 4 most recent
@@ -12,10 +16,8 @@ TTM rules (applied per quarter for history):
   - EPS = net_income_ttm / shares
   - P/B = price / book_value_per_share
 
-Equity is total shareholders equity excluding minority interests:
-  primary source is ``StockholdersEquity`` (parent equity);
-  fallback is ``StockholdersEquityIncludingNoncontrollingInterest``
-  minus ``MinorityInterest``.
+Equity is total shareholders equity excluding minority interests, taken
+from edgartools' ``StockholdersEquity`` (parent equity).
 
 Growth (``g_eps``): TTM-EPS CAGR over the last 2 years, computed from
 EPS available up to each date (PIT, no look-ahead). No floor or cap.
@@ -26,15 +28,13 @@ REITs) comes from edgartools natively:
   - ``company.business_category`` — 'Bank' / 'Insurance Company' / 'BDC' /
     'Investment Manager' / 'REIT' / 'Operating Company' / ...
   - ``company.industry`` — the SIC description string
-yfinance ``.info`` is only an optional supplement for the human-readable
-``sector``/``industry`` strings (kept for backward compatibility with the
-keyword fallback in the consumer). The precise financial filter does NOT
-depend on yfinance being reachable.
+The consumer ignores ``sector`` (always ``None``); ``industry`` carries the
+edgar SIC description.
 
 Usage:
     python scripts/download_edgartools_data.py
     python scripts/download_edgartools_data.py --tickers AAPL MSFT GOOG
-    python scripts/download_edgartools_data.py --output-dir data
+    python scripts/download_edgartools_data.py --output-dir lean_project/data
     python scripts/download_edgartools_data.py --backtest-start 2019-01-01
     # (defaults: --backtest-start=config.DATA_START)
 """
@@ -44,6 +44,7 @@ from __future__ import annotations
 from typing import Optional
 
 import argparse
+import csv
 import json
 import math
 import shutil
@@ -52,8 +53,6 @@ import time
 import traceback
 from datetime import datetime, timedelta, date
 from pathlib import Path
-
-import yfinance as yf
 
 # Add repo root to path so `import config` works (config/ is at repo root)
 _repo_root = Path(__file__).resolve().parent.parent.parent
@@ -64,6 +63,11 @@ if str(_repo_root) not in sys.path:
 _lean_project = Path(__file__).resolve().parent.parent
 if str(_lean_project) not in sys.path:
     sys.path.insert(0, str(_lean_project))
+
+# Add this scripts dir to path so `import build_cik_map` works for self-bootstrap
+_scripts_dir = Path(__file__).resolve().parent
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
 
 # Single source of truth for SEC identity: importing config sets edgar identity.
 # Imported before `from edgar import Company` so identity is guaranteed set
@@ -80,6 +84,8 @@ _SP500_GITHUB_URL = (
     "https://raw.githubusercontent.com/fja05680/sp500/master/"
     "sp500_ticker_start_end.csv"
 )
+
+_CIK_MAP_PATH = _lean_project / "data" / "sp500_cik_map.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +123,8 @@ def get_sp500_tickers(refresh: bool = False) -> list[str]:
     except Exception:
         pass
 
-    # Fallback: hardcoded subset (yfinance-style tickers; normalized later)
+    # Fallback: hardcoded subset (hyphenated ticker symbols; normalized to the
+    # edgar form by _variants)
     return [
         "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "BRK-B", "JNJ",
         "JPM", "V", "PG", "UNH", "HD", "MA", "NVDA", "DIS", "PYPL",
@@ -154,14 +161,27 @@ def _variants(ticker: str) -> list:
     return out
 
 
-def resolve_company(ticker: str) -> Optional[Company]:
-    """Resolve a ticker variant to a loaded edgartools ``Company``.
+def resolve_company(ticker: str, cik_map: Optional[dict] = None) -> Optional[Company]:
+    """Resolve a ticker to a loaded edgartools ``Company``.
 
-    Tries yfinance-style (BRK-B) and SEC-style (BRK.B) forms plus base
-    symbols so class-share tickers are not silently skipped. Returns the
-    resolved ``Company`` (callers reuse it — no second network lookup) or
-    ``None`` if none of the variants resolve.
+    Order:
+      1. If a curated ``cik_map`` holds this ticker, resolve directly by CIK
+         (``Company(int_cik)``). This is the only path that recovers delisted
+         constituents whose ticker is no longer in the SEC's live lookup.
+      2. Otherwise fall back to the edgar ticker variant loop
+          (``Company(var)``), which works for all *current* filers.
+
+    Returns the resolved ``Company`` (callers reuse it — no second network
+    lookup) or ``None`` if nothing resolves.
     """
+    if cik_map and ticker in cik_map:
+        cik = cik_map[ticker]
+        try:
+            c = Company(int(cik))
+            if c is not None and c.name:
+                return c
+        except Exception:
+            pass
     for var in _variants(ticker):
         try:
             c = Company(var)
@@ -170,27 +190,6 @@ def resolve_company(ticker: str) -> Optional[Company]:
         except Exception:
             continue
     return None
-
-
-# ---------------------------------------------------------------------------
-# yfinance supplement (optional — financial filter does not depend on it)
-# ---------------------------------------------------------------------------
-
-
-def get_yticker_info(ticker: str) -> dict:
-    """Get sector, industry, name, market_cap, price from yfinance (optional)."""
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        return {
-            "name": info.get("shortName") or info.get("longName"),
-            "sector": info.get("sector"),
-            "industry": info.get("industry"),
-            "market_cap": info.get("marketCap"),
-            "price": info.get("currentPrice") or info.get("regularMarketPrice"),
-        }
-    except Exception:
-        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +224,35 @@ def classify_company(company: Company) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# CIK map (ticker -> CIK) for recovering delisted constituents
+# ---------------------------------------------------------------------------
+
+
+def load_cik_map(path: Path) -> dict:
+    """Load the curated ``sp500_cik_map.csv`` (``ticker,cik``) into a dict.
+
+    CIKs are coerced to ``int`` so they can be passed straight to
+    ``Company(int_cik)``.  Returns an empty dict when the file is missing, so
+    callers fall back to the live ticker lookup.
+    """
+    if not path.exists():
+        return {}
+    out: dict = {}
+    with open(path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            t = (row.get("ticker") or "").strip()
+            c = (row.get("cik") or "").strip()
+            if not t or not c:
+                continue
+            try:
+                out[t] = int(c)
+            except ValueError:
+                continue
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Pure helpers (kept stable for tests/test_eps_growth.py)
 # ---------------------------------------------------------------------------
 
@@ -234,9 +262,7 @@ def get_parent_equity(tenq, fin):
 
     Uses edgartools' ``StockholdersEquity`` (parent equity, ex-minority),
     which is the value the consumer needs for ROE.  Returns ``None`` when the
-    fact is unavailable.  (The older noncontrolling-interest fallback
-    referenced methods that do not exist in edgartools 5.x, so it has been
-    removed rather than kept as dead code.)
+    fact is unavailable.
     """
     return fin.get_stockholders_equity()
 
@@ -474,8 +500,8 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        default="data",
-        help="Output directory for JSON files (relative to lean_project/)",
+        default=str(_lean_project / "data"),
+        help="Output directory for JSON files (defaults to lean_project/data)",
     )
     parser.add_argument(
         "--backtest-start",
@@ -528,6 +554,44 @@ def main():
         except Exception as e:
             print(f"WARN: could not load existing {hist_path.name}: {e}", file=sys.stderr)
 
+    # CIK map (ticker -> CIK) lets us recover delisted constituents that the
+    # live ticker lookup can no longer resolve. Self-bootstrap: if the map is
+    # missing, build it from edgar's bundled parquet before processing.
+    if not _CIK_MAP_PATH.exists():
+        print("CIK map missing; building from edgar lookup...", file=sys.stderr)
+        try:
+            from build_cik_map import build_cik_map
+
+            build_cik_map(_CIK_MAP_PATH, merge=True)
+        except Exception as e:
+            print(f"WARN: could not auto-build CIK map: {e}", file=sys.stderr)
+    cik_map = load_cik_map(_CIK_MAP_PATH)
+    print(f"Loaded CIK map: {len(cik_map)} tickers", file=sys.stderr)
+
+    # Persisted skip set: tickers with no edgar match (delisted without a
+    # curated CIK). Re-checked each run; a ticker present in the CIK map is
+    # never hard-skipped, so later curation can recover it.
+    skip_path = out_dir / "fundamentals_no_edgar_match.json"
+    skip_set: set = set()
+    if skip_path.exists() and not args.force:
+        try:
+            skip_set = set(json.load(open(skip_path, encoding="utf-8")))
+            print(
+                f"Resuming skip set: {len(skip_set)} tickers", file=sys.stderr
+            )
+        except Exception as e:
+            print(f"WARN: could not load {skip_path.name}: {e}", file=sys.stderr)
+
+    def _write_skip(path: Path, skip_set: set, backup: bool) -> None:
+        if backup and path.exists():
+            try:
+                bak = path.with_name(path.stem + ".bak.json")
+                shutil.copy2(path, bak)
+            except Exception:
+                pass
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(sorted(skip_set), f, indent=2)
+
     skipped = 0
     skipped_reasons: dict = {}
     tracebacks_shown = 0
@@ -545,10 +609,18 @@ def main():
         if ticker in history and not args.force:
             continue
 
-        company = resolve_company(ticker)
+        # A curated CIK can recover a previously-unmatched ticker, so never
+        # hard-skip a ticker that has a CIK entry — fall through and re-probe.
+        if ticker not in cik_map and ticker in skip_set and not args.force:
+            skipped += 1
+            skipped_reasons.setdefault("no_edgar_match", []).append(ticker)
+            continue
+
+        company = resolve_company(ticker, cik_map)
         if company is None:
             skipped += 1
             skipped_reasons.setdefault("no_edgar_match", []).append(ticker)
+            skip_set.add(ticker)
             continue
 
         try:
@@ -557,13 +629,10 @@ def main():
             sic = cls["sic"]
             business_category = cls["business_category"]
 
-            # yfinance supplement (optional) for human-readable sector/industry.
-            yinfo = get_yticker_info(ticker)
-            sector = yinfo.get("sector")
-            industry = yinfo.get("industry")
-            # Prefer edgar's SIC description when yfinance is unavailable.
-            if not industry and cls["industry"]:
-                industry = cls["industry"]
+            # sector is None (ignored by consumers); industry carries the edgar
+            # SIC description string.
+            sector = None
+            industry = cls["industry"]
 
             hist = get_quarterly_history(
                 company, args.backtest_start,
@@ -600,11 +669,13 @@ def main():
         # Flush incremental progress so a mid-run failure is recoverable.
         if i % FLUSH_EVERY == 0:
             _write_history(hist_path, history, backup=False)
+            _write_skip(skip_path, skip_set, backup=False)
 
         time.sleep(REQUEST_DELAY)
 
     # Final write with backup of the previous file.
     _write_history(hist_path, history, backup=True)
+    _write_skip(skip_path, skip_set, backup=True)
     print(
         f"History: {len(history)} tickers with quarterly data saved to {hist_path}",
         file=sys.stderr,

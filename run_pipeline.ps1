@@ -48,8 +48,36 @@ function Invoke-Step {
     Write-Host "`n===== [$script:Idx/$script:TotalSteps] $Name =====" -ForegroundColor Cyan
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $LASTEXITCODE = 0
-    & $Action
-    $code = $LASTEXITCODE
+
+    $logDir = Join-Path $RepoRoot "logs"
+    $log = Join-Path $logDir ("step{0:00}-{1}.log" -f $script:Idx, $Name.Replace(' ', '_'))
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+    # Capture merged stdout/stderr into a variable FIRST so $LASTEXITCODE keeps
+    # the action's real exit code (piping straight to Tee-Object would reset it
+    # to Tee's). Then tee the captured stream to the per-step log file.
+    #
+    # A native command's stderr is routed here via 2>&1 into the output stream.
+    # Under the script's $ErrorActionPreference='Stop' those writes would
+    # otherwise be treated as terminating errors and abort the whole pipeline
+    # (e.g. a harmless "[skip] ... already exists" line). Scope the capture to
+    # 'Continue' so a verbose/warning line on stderr cannot fail the run —
+    # genuine failures are still caught via the action's exit code below.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $raw = & $Action 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    # Flatten stderr ErrorRecords to plain strings so the console and per-step
+    # log aren't cluttered with PowerShell's "NativeCommandError" wrappers.
+    $stepOut = $raw | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+    }
+    $stepOut | Tee-Object -FilePath $log -Append
+
     $sw.Stop()
     if ($code -ne 0) {
         if ($Soft) {
