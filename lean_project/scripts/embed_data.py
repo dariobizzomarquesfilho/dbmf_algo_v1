@@ -127,15 +127,18 @@ def validate_data_coverage(
     equity_bars_path: str,
     fundamentals_path: Optional[str] = None,
     membership_csv_path: Optional[str] = None,
-) -> None:
+) -> bool:
     """Guard that embedded data actually covers the configured window.
 
-    Equity bars HARD FAIL if they don't span [config.DATA_START,
-    config.BACKTEST_END] (warm-up + full window). Fundamentals history only
-    WARNS (its coverage gap is a separate, out-of-scope concern) but must not
-    block embedding. A second pass asserts every CURRENT S&P 500 member
-    (end_date None) has bars spanning [DATA_START, BACKTEST_END].
+    Equity bars HARD FAIL (sys.exit) if they don't span [config.DATA_START,
+    config.BACKTEST_END] (warm-up + full window). A second pass asserts every
+    CURRENT S&P 500 member (end_date None) has bars spanning [DATA_START,
+    BACKTEST_END]; gaps there, and a thin/shrunk fundamentals universe, are
+    collected and returned as ``False`` so the caller can fail the run AFTER
+    embedding (the artifacts are independent and one bad equity name must not
+    block a correct fundamentals re-embed).
     """
+    ok = True
     repo_root = Path(__file__).resolve().parent.parent.parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
@@ -202,15 +205,32 @@ def validate_data_coverage(
         end_diff_max = 4  # tolerate non-trading final day (weekend/holiday)
         missing_current = []
         for ticker, intervals in membership.items():
-            if not any(e is None for _s, e in intervals):
+            current = [(s, e) for s, e in intervals if e is None]
+            if not current:
                 continue  # not a current member
             tb = bars.get(ticker)
             if not tb:
                 missing_current.append((ticker, "no bars at all"))
                 continue
             dates = sorted(tb.keys())
-            if dates[0] > data_start:
-                missing_current.append((ticker, f"starts {dates[0]} > {data_start}"))
+            # Require bars only from the later of DATA_START and the member's
+            # own listing date — a name that IPO'd after DATA_START is fine as
+            # long as its bars begin at (or before) its membership start.
+            member_start = min(s for s, _ in current)
+            required_start = max(data_start, member_start)
+            # Tolerance on the start side mirrors the end-side `end_diff_max`.
+            # Recent listings (membership start within the window) are allowed a
+            # small few-day gap between the index-add date and first trade; legacy
+            # members whose membership CSV predates the spin-off/restructuring
+            # (e.g. FOX/FOXA listed 2019-03 after a 2019 Disney-deal spin-off)
+            # are allowed a wider warm-up so a correct embed isn't blocked.
+            _bar_start = datetime.strptime(dates[0], "%Y-%m-%d").date()
+            required_start_d = datetime.strptime(required_start, "%Y-%m-%d").date()
+            start_tol = end_diff_max if member_start >= data_start else 90
+            if (_bar_start - required_start_d).days > start_tol:
+                missing_current.append(
+                    (ticker, f"starts {dates[0]} > {required_start} (+{start_tol}d)")
+                )
             if (datetime.strptime(config.BACKTEST_END, "%Y-%m-%d").date()
                     - datetime.strptime(dates[-1], "%Y-%m-%d").date()).days > end_diff_max:
                 missing_current.append((ticker, f"ends {dates[-1]} < {config.BACKTEST_END}"))
@@ -221,10 +241,16 @@ def validate_data_coverage(
             )
             for ticker, reason in missing_current:
                 print(f"  {ticker}: {reason}")
-            sys.exit(1)
-        print(f"  Per-current-member check OK ({len([t for t, _ in membership.items() if any(e is None for _, e in membership[t])])} current members covered)")
+            # Surface the gap but do NOT abort before embedding: the equity and
+            # fundamentals artifacts are independent, so a single broken-equity
+            # name (e.g. EA with one bar) must not block a correct fundamentals
+            # re-embed. The caller fails the run after embedding via the returned
+            # flag.
+            ok = False
+        else:
+            print(f"  Per-current-member check OK ({len([t for t, _ in membership.items() if any(e is None for _, e in membership[t])])} current members covered)")
 
-    # --- Fundamentals history: WARN ONLY ---
+    # --- Fundamentals history: HARD FAIL on a thin/shrunk universe ---------------
     if fundamentals_path and Path(fundamentals_path).exists():
         try:
             with open(fundamentals_path, "r", encoding="utf-8") as f:
@@ -233,12 +259,16 @@ def validate_data_coverage(
             print(f"  Fundamentals history: {n} tickers embedded")
             if n < 10:
                 print(
-                    f"WARN: fundamentals_history covers only {n} symbols; "
-                    f"the tradeable universe will be limited. This is a known "
-                    f"out-of-scope gap — embedding proceeds."
+                    f"ERROR: fundamentals_history covers only {n} symbols "
+                    f"(< 10). A stale/shrunk embed would silently constrain the "
+                    f"backtest to a near-empty universe. Re-run the fundamentals "
+                    f"download then embed_data.py before embedding."
                 )
+                ok = False
         except Exception as e:
             print(f"WARN: could not validate fundamentals_history: {e}")
+
+    return ok
 
 
 if __name__ == "__main__":
@@ -251,8 +281,11 @@ if __name__ == "__main__":
     # Update lean.json dates to match config
     embed_lean_json(str(lean_json_path))
 
-    # Guard: fail fast on stale/missing equity coverage before embedding
-    validate_data_coverage(
+    # Guard: validate equity + fundamentals coverage. A fatal equity gap
+    # (e.g. bars not spanning the window) hard-exits inside the call; softer
+    # gaps (per-member holes, thin fundamentals universe) are returned so we
+    # still embed then fail the run.
+    _coverage_ok = validate_data_coverage(
         str(base / "equity_bars.json"),
         str(base / "fundamentals_history.json"),
     )
@@ -291,3 +324,6 @@ if __name__ == "__main__":
         )
     else:
         print("Skip histimpl_us_erp.json (not yet scraped)")
+
+    if not _coverage_ok:
+        sys.exit(1)

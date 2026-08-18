@@ -80,6 +80,18 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                     "download_equity_data.py then embed_data.py."
                 )
 
+        # Guard: fail loudly if the embedded fundamentals universe is too thin.
+        # A stale/shrunk embed (e.g. only AAPL/MSFT) would silently cap the
+        # screen to those names and produce a ~2-ticker backtest with no error.
+        _fh_count = len(self.fundamentals_history)
+        if _fh_count < 100:
+            self.Error(
+                "FUNDAMENTALS UNIVERSE TOO SMALL: embedded fundamentals_history "
+                f"covers only {_fh_count} symbols (expected >= 100). A stale build "
+                "produced a near-empty universe. Re-run download_edgartools_data.py "
+                "then embed_data.py before backtesting."
+            )
+
         # Load S&P 500 PIT membership
         import csv
         from pathlib import Path
