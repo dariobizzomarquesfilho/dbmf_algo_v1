@@ -31,10 +31,17 @@ def convert(bars_json_path: str, output_dir: str):
             print(f"  Converted {i}/{len(bars)} tickers...", file=sys.stderr)
 
         buf = StringIO()
+        # QuantConnect equity daily CSVs store OHLC pre-multiplied by 10000 (4
+        # decimals of dollar precision); Lean divides by 1/10000 on read via
+        # TradeBar.ParseEquity. Write scaled ints so fills/pricing are correct.
         for date_str in sorted(ticker_bars.keys()):
             b = ticker_bars[date_str]
             time_str = date_str.replace("-", "")
-            buf.write(f"{time_str} 00:00,{b['open']},{b['high']},{b['low']},{b['close']},{int(b.get('volume', 0))}\n")
+            o = int(round(float(b["open"]) * 10000))
+            h = int(round(float(b["high"]) * 10000))
+            l = int(round(float(b["low"]) * 10000))
+            c = int(round(float(b["close"]) * 10000))
+            buf.write(f"{time_str} 00:00,{o},{h},{l},{c},{int(b.get('volume', 0))}\n")
 
         csv_content = buf.getvalue()
         zip_path = out_dir / f"{ticker.lower()}.zip"

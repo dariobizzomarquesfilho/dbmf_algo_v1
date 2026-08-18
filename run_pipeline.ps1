@@ -113,6 +113,7 @@ Add-Step "Build Lean PIT ERP history"              { python implied_erp/scripts/
 # C — Lean data regeneration
 Add-Step "Download edgartools PIT fundamentals"    { python lean_project/scripts/download_edgartools_data.py }
 Add-Step "Download equity bars"                    { python lean_project/scripts/download_equity_data.py }
+Add-Step "Recover missing delisted bars"           { python lean_project/scripts/fetch_missing_delisted.py --apply }
 Add-Step "Convert to QC zip format"                { python lean_project/scripts/convert_to_qc_format.py }
 Add-Step "Embed data into Lean modules"            { python lean_project/scripts/embed_data.py }   # hard-requires PIT history
 

@@ -99,10 +99,19 @@ def _write_csv_zip(zip_path: Path, ticker: str, ticker_bars: dict) -> None:
       where date = YYYYMMDD, time = "00:00"
     """
     buf = StringIO()
+    # QuantConnect equity daily CSVs store OHLC pre-multiplied by 10000 (4 decimals
+    # of dollar precision); Lean divides by _scaleFactor=1/10000 on read via
+    # TradeBar.ParseEquity. Writing raw yfinance values would fill orders 10000x too
+    # cheap. The embedded equity_bars module stays unscaled (used by SetMarketPrice);
+    # only the on-disk .zip Lean reads is scaled.
     for date_str in sorted(ticker_bars.keys()):
         b = ticker_bars[date_str]
         time_str = date_str.replace("-", "")
-        buf.write(f"{time_str} 00:00,{b['open']},{b['high']},{b['low']},{b['close']},{int(b.get('volume', 0))}\n")
+        o = int(round(float(b["open"]) * 10000))
+        h = int(round(float(b["high"]) * 10000))
+        l = int(round(float(b["low"]) * 10000))
+        c = int(round(float(b["close"]) * 10000))
+        buf.write(f"{time_str} 00:00,{o},{h},{l},{c},{int(b.get('volume', 0))}\n")
     csv_content = buf.getvalue()
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{ticker}.csv", csv_content)
@@ -118,5 +127,8 @@ def _write_map_file(map_path: Path, ticker: str, ticker_bars: dict) -> None:
         return
     start = dates[0].replace("-", "")
     end = dates[-1].replace("-", "")
-    content = f"{start},{ticker},Q\n{end},{ticker},Q\n"
+    # QC map-file format: <YYYYMMDD>,<fromTicker>,<toTicker>. We never rename,
+    # so write a valid identity mapping (start/end -> ticker). The previous
+    # ",Q" rows were malformed and could mis-map the symbol.
+    content = f"{start},{ticker},{ticker}\n{end},{ticker},{ticker}\n"
     map_path.write_text(content, encoding="utf-8")

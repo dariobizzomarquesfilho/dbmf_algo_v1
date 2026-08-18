@@ -1,0 +1,93 @@
+[
+  {
+    "ticker": "ADS",
+    "start": "2013-12-23",
+    "end": "2020-06-22",
+    "source": "tiingo",
+    "reason": "excluded_complex"
+  },
+  {
+    "ticker": "BF.B",
+    "start": "1996-01-02",
+    "end": "2026-07-31",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "BK",
+    "start": "1996-01-02",
+    "end": "2026-05-21",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "BRK.B",
+    "start": "2010-02-16",
+    "end": "2026-07-31",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "CDAY",
+    "start": "2021-09-20",
+    "end": "2024-02-01",
+    "source": "tiingo",
+    "reason": "excluded_complex"
+  },
+  {
+    "ticker": "COG",
+    "start": "2008-06-23",
+    "end": "2021-10-04",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "FB",
+    "start": "2013-12-23",
+    "end": "2022-06-09",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "FBHS",
+    "start": "2016-06-24",
+    "end": "2022-12-19",
+    "source": "tiingo",
+    "reason": "excluded_complex"
+  },
+  {
+    "ticker": "INFO",
+    "start": "2017-06-02",
+    "end": "2022-03-02",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "LB",
+    "start": "1996-01-02",
+    "end": "2021-08-03",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "MMC",
+    "start": "1996-01-02",
+    "end": "2026-01-14",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "SBNY",
+    "start": "2021-12-20",
+    "end": "2023-03-15",
+    "source": "tiingo",
+    "reason": "tiingo_foreign_collision:PINK"
+  },
+  {
+    "ticker": "VIAC",
+    "start": "2019-12-05",
+    "end": "2022-02-17",
+    "source": "tiingo",
+    "reason": "excluded_complex"
+  }
+]

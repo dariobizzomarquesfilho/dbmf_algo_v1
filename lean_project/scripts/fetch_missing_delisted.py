@@ -376,10 +376,12 @@ def main() -> None:
 
     bars = json.load(open(args.bars_path, encoding="utf-8")) if Path(args.bars_path).exists() else {}
     membership = load_sp500_membership(args.membership_csv)
-    token = config.TIINGO_API_KEY
+
     ctx = _ssl_context()
 
     win_start, win_end = config.BACKTEST_START, config.BACKTEST_END
+
+    token = config.TIINGO_API_KEY
 
     new_bars, unavailable, plan = recover_gaps(
         bars, membership, win_start, win_end, token, ctx, pacing=args.pacing

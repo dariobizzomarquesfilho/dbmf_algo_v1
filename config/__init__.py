@@ -9,6 +9,7 @@ from .config import (
     BACKTEST_HISTORY_START,
     HISTORY_START,
     HISTORY_START_DATE,
+    TIINGO_API_KEY,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "BACKTEST_HISTORY_START",
     "HISTORY_START",
     "HISTORY_START_DATE",
+    "TIINGO_API_KEY",
 ]

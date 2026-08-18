@@ -86,9 +86,9 @@ lean_project/data/equity_bars.20260811T111738Z.bak.json
 lean_project/data/fundamentals_history.json
 lean_project/data/damodaran_erp.json
 lean_project/data/damodaran_erp_history.json
-lean_project/data/missing-data.json
-lean_project/data/missing-data.txt
 lean_project/data/equity_bars.throttled.txt
+lean_project/data/fundamentals_no_edgar_match.bak.json
+lean_project/data/fundamentals_history.bak.json
 
 # Lean engine source (cloned dependency, not project code)
 lean_project/Lean/

@@ -112,6 +112,12 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 continue
             if not any(start <= date_str and (end is None or date_str <= end) for start, end in entries):
                 continue
+            # Safety net: only register tickers we actually have bars for. Names
+            # the download dropped and recovery couldn't source (foreign-listing
+            # collisions, 404s) land in equity_unavailable.json and would
+            # otherwise produce failed data requests.
+            if ticker not in self.bars_cache:
+                continue
             try:
                 self.AddEquity(ticker, Resolution.Daily)
                 self._registered.append(ticker)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 BACKTEST_START = '2020-01-01'
-BACKTEST_END = '2026-08-01'
+BACKTEST_END = '2026-07-31'
 
 def load_backtest_window() -> dict:
     """Return the configured backtest window."""

@@ -97,3 +97,8 @@ def trading_days_before(start_date: date, n: int = BACKTEST_WARMUP_DAYS) -> date
 DATA_START_DATE = trading_days_before(BACKTEST_START_DATE, BACKTEST_WARMUP_DAYS)
 DATA_START = DATA_START_DATE.isoformat()
 DATA_END = BACKTEST_END
+
+# Optional Tiingo API key used by the missing-window recovery script
+# (fetch_missing_delisted.py). When unset, the script skips the Tiingo
+# fallback and degrades to the curated-rename + unavailable path.
+TIINGO_API_KEY = os.getenv("TIINGO_API_KEY")
