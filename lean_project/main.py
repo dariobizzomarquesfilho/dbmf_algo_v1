@@ -123,25 +123,41 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         n_written = bootstrap(cwd)
         self.Log(f"DIAG cwd={cwd} data_dirs={[str(d) for d in _find_data_dirs(cwd)]} bootstrap_wrote={n_written}")
 
-        # Register all S&P 500 tickers as equities (for SetHoldings/order execution)
+        # Subscriptions must be point-in-time: a name that joins the S&P 500
+        # AFTER the backtest start must still become tradeable on its actual
+        # membership start date (otherwise ~300 later additions are silently
+        # never traded). But subscribing ALL members up front blows Lean's
+        # 10s security-initialization limit, so we only subscribe the members
+        # active as of the start date here, and dynamically AddEquity() each
+        # remaining member on the day its membership begins (see
+        # _ensure_subscribed / OnData). Entry/exit is enforced by CoarseSelection.
         self._registered = []
+        self._subscribed = set()  # every ticker we have ever AddEquity()'d
         date_str = self.Time.strftime("%Y-%m-%d")
+        skipped_no_bars = []
         for ticker, entries in self.sp500_membership.items():
             if ticker == "^TNX":
                 continue
-            if not any(start <= date_str and (end is None or date_str <= end) for start, end in entries):
+            if not entries:
                 continue
-            # Safety net: only register tickers we actually have bars for. Names
-            # the download dropped and recovery couldn't source (foreign-listing
-            # collisions, 404s) land in equity_unavailable.json and would
-            # otherwise produce failed data requests.
             if ticker not in self.bars_cache:
+                skipped_no_bars.append(ticker)
+                continue
+            # Only pre-subscribe members active as of the start date; later
+            # additions are handled dynamically in _ensure_subscribed().
+            if not any(start <= date_str and (end is None or date_str <= end) for start, end in entries):
                 continue
             try:
                 self.AddEquity(ticker, Resolution.Daily)
                 self._registered.append(ticker)
+                self._subscribed.add(ticker)
             except Exception as e:
                 self.Log(f"WARN: failed to register {ticker}: {e}")
+        if skipped_no_bars:
+            self.Log(
+                f"DIAG skipped {len(skipped_no_bars)} S&P500 members with no bars "
+                f"(e.g. {', '.join(skipped_no_bars[:10])})"
+            )
 
         self.trailing_stops = {}
         self.selected_symbols = set()
@@ -228,10 +244,41 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
     def OnData(self, data):
         """Trigger daily rebalance on each new trading day."""
         today = self.Time.date()
+        # Dynamically subscribe any S&P 500 member whose membership starts
+        # today, so it becomes tradeable point-in-time (see Initialize note).
+        # AddEquity is throttled by _subscribed so each name is added once.
+        self._ensure_subscribed(self.Time.strftime("%Y-%m-%d"))
         if self.last_rebalance_date == today:
             return
         self.last_rebalance_date = today
         self.DailyRebalance()
+
+    def _ensure_subscribed(self, date_str: str) -> None:
+        """AddEquity() for any member whose membership begins on ``date_str``.
+
+        Called every trading day from OnData. Only names we have bars for are
+        subscribed (no-bars names stay in equity_unavailable). Each ticker is
+        added at most once via ``self._subscribed``.
+        """
+        for ticker, entries in self.sp500_membership.items():
+            if ticker in self._subscribed or ticker == "^TNX":
+                continue
+            if ticker not in self.bars_cache:
+                continue
+            # Subscribe any membership interval that has already started (<= today).
+            # Using <= (not ==) guarantees a name whose start date falls on a
+            # weekend/holiday is still caught up on the next trading day.
+            if any(start <= date_str for start, _ in entries):
+                try:
+                    self.AddEquity(ticker, Resolution.Daily)
+                    self._registered.append(ticker)
+                    self._subscribed.add(ticker)
+                    self._symbols[ticker] = Symbol.Create(
+                        ticker, SecurityType.Equity, Market.USA
+                    )
+                    self.Log(f"SUBSCRIBE {ticker} (index add {date_str})")
+                except Exception as e:
+                    self.Log(f"WARN: failed to subscribe {ticker}: {e}")
 
     # ------------------------------------------------------------------
     # Corporate-action exits (renames/mergers/delistings + spinoffs)
