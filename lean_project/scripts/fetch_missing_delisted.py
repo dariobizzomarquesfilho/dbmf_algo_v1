@@ -33,6 +33,7 @@ import ssl
 import sys
 import time
 import urllib.request
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -156,6 +157,12 @@ def _yahoo_history(ticker: str, start: str, end: str) -> Optional[dict]:
         return None
 
 
+def _yahoo_end_exclusive(end: str) -> str:
+    """yfinance `end` is exclusive; return end + 1 day so the fetched window
+    actually covers `end` (e.g. 2026-07-31 -> last bar 2026-07-31)."""
+    return (date.fromisoformat(end) + timedelta(days=1)).isoformat()
+
+
 def _rename_bars(
     pred: str,
     succ: str,
@@ -171,7 +178,7 @@ def _rename_bars(
     succ_bars = bars_cache.get(succ)
     if succ_bars is None:
         start, end = membership_window(membership[pred], default_end)
-        succ_bars = _yahoo_history(succ, start, end)
+        succ_bars = _yahoo_history(succ, start, _yahoo_end_exclusive(end))
     if not succ_bars:
         return None, f"rename_failed:successor_{succ}_no_bars"
 

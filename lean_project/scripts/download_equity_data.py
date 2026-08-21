@@ -47,6 +47,12 @@ from data.sp500_data import load_sp500_membership, clip_to_membership
 # for longer-window backtests later. DATA_START stays only for the coverage guard.
 BACKTEST_START = config.HISTORY_START
 BACKTEST_END = config.BACKTEST_END
+# yfinance treats `end` as EXCLUSIVE, so the fetched window stops one day
+# short of BACKTEST_END (e.g. end=2026-07-31 -> last bar 2026-07-30). Add a
+# day so the data actually covers the full configured backtest window.
+BACKTEST_END_EXCLUSIVE = (
+    datetime.strptime(BACKTEST_END, "%Y-%m-%d") + timedelta(days=1)
+).strftime("%Y-%m-%d")
 
 _DATA_DIR = _SCRIPT_DIR.parent / "data"
 _SP500_CSV = _DATA_DIR / "sp500_ticker_start_end.csv"
@@ -157,7 +163,7 @@ def download_daily_bars(tickers: list, output_path: str, membership=None, end_de
             data = yf.download(
                 ticker,
                 start=BACKTEST_START,
-                end=BACKTEST_END,
+                end=BACKTEST_END_EXCLUSIVE,
                 progress=False,
                 threads=False,
                 auto_adjust=True,

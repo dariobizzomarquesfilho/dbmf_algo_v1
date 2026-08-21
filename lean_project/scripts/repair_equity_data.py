@@ -23,7 +23,7 @@ import csv
 import json
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -224,6 +224,11 @@ def main() -> None:
 
     HISTORY_START = config.HISTORY_START
     BACKTEST_END = config.BACKTEST_END
+    # yfinance treats `end` as EXCLUSIVE, so pass BACKTEST_END + 1 day to the
+    # fetch (otherwise recovered bars stop one day short of the window).
+    BACKTEST_END_EXCLUSIVE = (
+        _parse_date(BACKTEST_END) + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
     win_start = _parse_date(config.BACKTEST_START)
 
     bars, report = run_repair(
@@ -231,7 +236,7 @@ def main() -> None:
         membership,
         requested,
         HISTORY_START,
-        BACKTEST_END,
+        BACKTEST_END_EXCLUSIVE,
         win_start,
     )
     recovered = report["recovered"]

@@ -12,13 +12,13 @@ All positions equal-weight (1/max_positions).
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from AlgorithmImports import *
 from data.sp500_data import load_sp500_membership
 from data.corporate_actions import corporate_action_exits
-from universe.pb_roe_universe import run_fine_selection
+from universe.pb_roe_universe import run_fine_selection, log_missing_g_eps_summary
 from indicators.atr_trailing_stop import compute_atr_trailing_stop
 from data.equity_bars import load_equity_bars
 
@@ -72,7 +72,14 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             all_dates.update(_ticker_bars.keys())
         if all_dates:
             _earliest, _latest = min(all_dates), max(all_dates)
-            if _earliest > window["start"] or _latest < window["end"]:
+            # Tolerate a short gap at the tail (weekend/holiday) so a 1-day
+            # offset between the last bar and BACKTEST_END doesn't raise a
+            # spurious mismatch (the embed step already allows 4 days).
+            _tail_gap = (
+                datetime.strptime(window["end"], "%Y-%m-%d").date()
+                - datetime.strptime(_latest, "%Y-%m-%d").date()
+            ).days
+            if _earliest > window["start"] or _tail_gap > 4:
                 self.Error(
                     "EQUITY BAR COVERAGE MISMATCH: embedded bars span "
                     f"{_earliest}..{_latest} but backtest window is "
@@ -266,17 +273,20 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         # runs ONLY when a buy opportunity exists: a slot is free (initial
         # fill or a stop just freed one). Fully-held days skip it entirely.
         if len(self.selected_symbols) < self.max_positions:
-            selected = getattr(self, "_cached_selection", None)
-            if selected is None:
-                selected = run_fine_selection(
-                    algorithm=self,
-                    tickers=list(self.fundamentals_history.keys()),
-                    max_positions=self.max_positions,
-                    bars_cache=self.bars_cache,
-                    history_cache=self.fundamentals_history,
-                    market_bars=self.market_bars,
-                    erp_history_cache=self.erp_history_cache,
-                )
+            # Always run a FRESH point-in-time screen. Reusing FineSelection's
+            # cached result here freezes the portfolio on the day-1 picks and
+            # prevents any rotation once slots free up (root cause of the
+            # 12-order backtest: after the initial names stopped out, the same
+            # stale 10 names were retried forever, all in cooldown -> deadlock).
+            selected = run_fine_selection(
+                algorithm=self,
+                tickers=list(self.fundamentals_history.keys()),
+                max_positions=self.max_positions,
+                bars_cache=self.bars_cache,
+                history_cache=self.fundamentals_history,
+                market_bars=self.market_bars,
+                erp_history_cache=self.erp_history_cache,
+            )
 
             # Never re-add a ticker that has a corporate-action exit today
             # (rename/merger/delisting or spinoff parent) within the same cycle.
@@ -292,6 +302,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             # Add new positions
             from datetime import datetime, timedelta
             today = self.Time.date()
+            added = set()
             for symbol_str in selected:
                 if symbol_str in self.selected_symbols:
                     continue
@@ -309,8 +320,12 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 self.SetHoldings(symbol, weight)
                 self.trailing_stops[symbol_str] = self._compute_stop(symbol_str)
                 self.Log(f"Added {symbol_str} @ {weight:.1%}")
+                added.add(symbol_str)
 
-            self.selected_symbols = selected_set
+            # Track ONLY the names we actually hold or just added — NOT the full
+            # screen target. Otherwise un-fillable (no-data) picks pin the book
+            # at max_positions and freeze every future re-screen.
+            self.selected_symbols = (self.selected_symbols & selected_set) | added
 
     # ------------------------------------------------------------------
     # ATR stops
@@ -353,6 +368,9 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             self.Liquidate(symbol)
         self.sell_dates[symbol_str] = self.Time.strftime("%Y-%m-%d")  # start cooldown
         self.trailing_stops.pop(symbol_str, None)
+        # Drop from the tracked set so the slot frees up and future re-screens
+        # are not frozen by a phantom "full" book.
+        self.selected_symbols.discard(symbol_str)
 
     def _compute_stop(self, symbol_str: str, prev_stop: Optional[float] = None) -> Optional[float]:
         # as_of_date = today, so the stop uses only bars up to the current day
@@ -372,6 +390,9 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self.Log("BACKTEST COMPLETE")
         self.Log(f"Period: {self.StartDate} to {self.EndDate}")
         self.Log(f"Final Value: {self.Portfolio.TotalPortfolioValue:,.2f}")
+        # Consolidated EPS-growth coverage warning (one line per ticker, with
+        # the as_of span it was missing) instead of per-rebalance spam.
+        log_missing_g_eps_summary(self)
         invested = sum(
             1 for s in self.Portfolio.Keys if self.Portfolio[s].Invested
         )

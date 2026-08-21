@@ -134,6 +134,48 @@ def get_erp(erp_cache: dict, country: str = "United States") -> float:
     return 0.055
 
 
+def _record_missing_g_eps(algorithm, ticker: str, as_of: str) -> None:
+    """Track the as_of span over which a ticker lacked ``g_eps``.
+
+    The screen skips these names every rebalance, which would otherwise emit
+    one WARN line per ticker per day.  We instead record the first/last
+    ``as_of`` date here and emit a single consolidated summary at the end of
+    the backtest (see :func:`log_missing_g_eps_summary`).
+    """
+    spans = getattr(algorithm, "_missing_g_eps_spans", None)
+    if spans is None:
+        spans = {}
+        algorithm._missing_g_eps_spans = spans
+    rec = spans.get(ticker)
+    if rec is None:
+        spans[ticker] = [as_of, as_of]
+    else:
+        rec[1] = as_of
+
+
+def log_missing_g_eps_summary(algorithm) -> None:
+    """Emit ONE consolidated warning per ticker instead of per-rebalance noise.
+
+    Reports the as_of span during which each ticker had no 2y TTM-EPS history
+    (``g_eps`` was ``None``) and was therefore skipped by the screen.
+    """
+    spans = getattr(algorithm, "_missing_g_eps_spans", None)
+    if not spans:
+        return
+    algorithm.Log("=" * 60)
+    algorithm.Log(
+        f"EPS GROWTH COVERAGE: {len(spans)} ticker(s) lacked g_eps "
+        f"(2y TTM-EPS history) during the backtest and were skipped:"
+    )
+    for ticker in sorted(spans):
+        first, last = spans[ticker]
+        algorithm.Log(
+            f"  WARN {ticker}: missing EPS growth (need 2y TTM-EPS history) "
+            f"during {first} to {last}"
+        )
+    algorithm.Log("=" * 60)
+
+
 def run_fine_selection(
     algorithm: QCAlgorithm,
     tickers: list,
@@ -225,9 +267,17 @@ def run_fine_selection(
             if book_value is None or book_value <= 0:
                 continue
 
-            # PIT price
-            current_price = latest_price_as_of(ticker_bars, as_of)
-            if current_price is None or current_price <= 0:
+            # PIT price: use the bar on the ACTUAL backtest date (absolute),
+            # not the latest *available* bar. A name with no bar on as_of is
+            # not tradeable that day (delisted, or a throttled/dropped equity
+            # download such as FCN last traded 1998, FMCC 2008) and must be
+            # skipped; falling back to the latest available bar would mis-rank
+            # it on a stale price and starve tradeable names of screen slots.
+            bar = ticker_bars.get(as_of)
+            if not bar:
+                continue
+            current_price = float(bar.get("close", 0))
+            if current_price <= 0:
                 continue
 
             pb = current_price / book_value
@@ -235,10 +285,9 @@ def run_fine_selection(
             # Growth: PIT EPS CAGR — no fallback, error + skip if unavailable
             g_start = snap.get("g_eps")
             if g_start is None:
-                algorithm.Log(
-                    f"WARN {ticker}: no EPS growth available "
-                    f"(need 2y TTM-EPS history), skipping"
-                )
+                # Record the span and emit one consolidated warning at the end
+                # of the backtest instead of spamming a line every rebalance.
+                _record_missing_g_eps(algorithm, ticker, as_of)
                 continue
 
             g_term = rf
