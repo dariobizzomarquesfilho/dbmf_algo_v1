@@ -103,7 +103,7 @@ def screen_successor(
 
     Returns ``"clean"`` when no such discontinuity exists near the exit.
     """
-    if not successor_bars or exit_date not in successor_bars:
+    if not successor_bars:
         return "clean"
 
     dates = sorted(successor_bars.keys())
@@ -134,8 +134,14 @@ def screen_successor(
 def _days_between(a: str, b: str) -> int:
     from datetime import date
 
-    da = date.fromisoformat(a)
-    db = date.fromisoformat(b)
+    def _parse_iso(s: str) -> date:
+        # Accept both YYYY-MM-DD and YYYYMMDD
+        if len(s) == 8 and s.isdigit():
+            return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+        return date.fromisoformat(s)
+
+    da = _parse_iso(a)
+    db = _parse_iso(b)
     return (da - db).days
 
 
@@ -143,9 +149,17 @@ def membership_window(
     intervals: list[tuple[str, Optional[str]]],
     default_end: str,
 ) -> tuple[str, Optional[str]]:
-    """Union of membership intervals -> (earliest_start, latest_end_or_default)."""
+    """Union of membership intervals -> (earliest_start, latest_end_or_default).
+
+    If any interval is open-ended (end is None) the union is open-ended — we
+    return None and the caller substitutes ``default_end``. Otherwise the
+    latest end date is the union end.
+    """
     starts = [s for s, _ in intervals]
     ends = [e for _, e in intervals]
     start = min(starts)
-    end = max(ends) if any(e is not None for e in ends) else None
-    return start, (end if end is not None else default_end)
+    # If any interval is open (still a member) the union is open.
+    if any(e is None for e in ends):
+        return start, default_end
+    end = max(ends)  # type: ignore[arg-type]  # all str here
+    return start, end

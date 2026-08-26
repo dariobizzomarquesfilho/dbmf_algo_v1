@@ -2,8 +2,9 @@
 
 Loads ``sp500_ticker_start_end.csv`` and provides:
 - ``load_sp500_membership()`` — returns ``{ticker: [(start_date, end_date_or_None), ...]}``
-- ``is_sp500_member()`` — checks if a ticker is active on a given date
-- ``active_sp500_tickers()`` — returns tickers active as of a date
+- ``intervals_active()`` — membership predicate for a ticker's intervals on a date
+- ``clip_to_membership()`` — keep only bars inside membership intervals
+- ``build_alias_map()`` — diagnostics-only rename predecessor/successor map
 """
 
 from __future__ import annotations
@@ -16,34 +17,37 @@ from typing import Optional
 def load_sp500_membership(csv_path: str) -> dict[str, list[tuple[str, Optional[str]]]]:
     """Return {ticker: [(start_date, end_date_or_None), ...]}."""
     membership: dict[str, list[tuple[str, Optional[str]]]] = {}
-    with open(csv_path, newline="", encoding="utf-8") as f:
+    with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
+        if reader.fieldnames:
+            reader.fieldnames = [h.strip() for h in reader.fieldnames]
         for row in reader:
-            ticker = row["ticker"].strip()
+            # Handle BOM/case variants
+            ticker = (row.get("ticker") or row.get("Ticker") or "").strip()
             if not ticker:
                 continue
-            start = row["start_date"].strip()
-            end = row["end_date"].strip() or None
+            start = (row.get("start_date") or row.get("Start_date") or "").strip()
+            end_raw = (row.get("end_date") or row.get("End_date") or "")
+            end = end_raw.strip() or None
+            if not start:
+                continue
             membership.setdefault(ticker, []).append((start, end))
     return membership
 
 
-def is_sp500_member(membership: dict[str, list[tuple[str, Optional[str]]]],
-                    ticker: str, date_str: str) -> bool:
-    """Check if ticker is an S&P 500 member on date_str (inclusive)."""
-    entries = membership.get(ticker, [])
+def intervals_active(entries: list[tuple[str, Optional[str]]], date_str: str) -> bool:
+    """Return True if ``date_str`` falls inside any (start, end_or_None) interval.
+
+    ``end is None`` means the interval is open-ended (a current member). The
+    comparison uses ISO ``YYYY-MM-DD`` strings, which compare correctly with
+    ``<=``. This is the single membership predicate used for both index-entry
+    enforcement and dynamic subscription; requiring ``date_str <= end`` (when
+    ended) prevents long-dead historical members from being subscribed.
+    """
     for start, end in entries:
         if start <= date_str and (end is None or date_str <= end):
             return True
     return False
-
-
-def active_sp500_tickers(membership: dict[str, list[tuple[str, Optional[str]]]],
-                          date_str: str) -> list[str]:
-    """Return all tickers active in the S&P 500 on date_str."""
-    return [t for t, entries in membership.items()
-            if any(start <= date_str and (end is None or date_str <= end)
-                    for start, end in entries)]
 
 
 def clip_to_membership(

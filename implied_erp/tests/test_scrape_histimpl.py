@@ -46,12 +46,13 @@ def test_parse_fixture_year_range_and_decimal():
     # 1960 row has an empty FCFE cell (NaN) -> dropped.
     assert "1960-01-01" not in history
     assert "2025-01-01" in history
-    # 1959 (below YEAR_MIN) and 2026 (above YEAR_MAX) dropped.
+    # 1959 (below YEAR_MIN) dropped; 2026 is now included (YEAR_MAX is dynamic).
     assert "1959-01-01" not in history
-    assert "2026-01-01" not in history
-    # 1961 + 2025 conversions.
+    assert "2026-01-01" in history
+    # 1961 + 2025 + 2026 conversions.
     assert abs(history["1961-01-01"] - 0.0292) < 1e-9
     assert abs(history["2025-01-01"] - 0.0423) < 1e-9
+    assert abs(history["2026-01-01"] - 0.0410) < 1e-9
 
 
 def test_parse_fixture_bounds_dropped_rows():
@@ -61,4 +62,4 @@ def test_parse_fixture_bounds_dropped_rows():
     assert max(years) <= YEAR_MAX
     # 1960 row has empty FCFE (NaN) → not present.
     assert "1960-01-01" not in history
-    assert len(history) == 2  # only 1961 and 2025
+    assert len(history) == 3  # 1961, 2025 and 2026

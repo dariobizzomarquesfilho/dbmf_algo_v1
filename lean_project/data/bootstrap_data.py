@@ -60,6 +60,8 @@ def _find_data_dirs(base_dir: str = None) -> list:
 def bootstrap(base_dir: str = None) -> int:
     """Write embedded equity bars to QC data folder(s). Returns count written."""
     bars = load_equity_bars()
+    total_expected = len([t for t, tb in bars.items() if tb])
+    written_tickers: set[str] = set()
     written = 0
     for data_dir in _find_data_dirs(base_dir):
         daily_dir = data_dir / "equity" / "usa" / "daily"
@@ -69,12 +71,29 @@ def bootstrap(base_dir: str = None) -> int:
         map_dir = data_dir / "equity" / "usa" / "map_files"
         map_dir.mkdir(parents=True, exist_ok=True)
 
-        # Remove stale old-format files (.csv.zip with header row)
+        # Remove stale old-format files (.csv.zip with header row) and orphan
+        # .zip for tickers no longer in bars (ghost data from a prior embed).
         for stale in daily_dir.glob("*.csv.zip"):
             try:
                 stale.unlink()
             except OSError:
                 pass
+        # Remove orphan .zip not in current bars
+        valid_zips = {t.lower() + ".zip" for t in bars.keys()}
+        for existing in daily_dir.glob("*.zip"):
+            if existing.name not in valid_zips:
+                try:
+                    existing.unlink()
+                except OSError:
+                    pass
+        # Remove orphan map_files not in current bars
+        valid_maps = {t.lower() + ".csv" for t in bars.keys()}
+        for existing in map_dir.glob("*.csv"):
+            if existing.name not in valid_maps:
+                try:
+                    existing.unlink()
+                except OSError:
+                    pass
 
         for ticker, ticker_bars in bars.items():
             if not ticker_bars:
@@ -82,10 +101,15 @@ def bootstrap(base_dir: str = None) -> int:
             # QC resolves daily equity as lowercase <ticker>.zip (no .csv suffix)
             ticker_lc = ticker.lower()
             zip_path = daily_dir / f"{ticker_lc}.zip"
-            _write_csv_zip(zip_path, ticker_lc, ticker_bars)
-            _write_map_file(map_dir / f"{ticker_lc}.csv", ticker_lc, ticker_bars)
-            written += 1
-    return written
+            try:
+                _write_csv_zip(zip_path, ticker_lc, ticker_bars)
+                _write_map_file(map_dir / f"{ticker_lc}.csv", ticker_lc, ticker_bars)
+                written += 1
+                written_tickers.add(ticker_lc)
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue
+    # Return unique tickers actually written (de-duplicated), not per-dir inflated count
+    return len(written_tickers) if written_tickers else total_expected
 
 
 def _write_csv_zip(zip_path: Path, ticker: str, ticker_bars: dict) -> None:
@@ -98,6 +122,7 @@ def _write_csv_zip(zip_path: Path, ticker: str, ticker_bars: dict) -> None:
     - columns: date time, open, high, low, close, volume
       where date = YYYYMMDD, time = "00:00"
     """
+    import math
     buf = StringIO()
     # QuantConnect equity daily CSVs store OHLC pre-multiplied by 10000 (4 decimals
     # of dollar precision); Lean divides by _scaleFactor=1/10000 on read via
@@ -106,29 +131,52 @@ def _write_csv_zip(zip_path: Path, ticker: str, ticker_bars: dict) -> None:
     # only the on-disk .zip Lean reads is scaled.
     for date_str in sorted(ticker_bars.keys()):
         b = ticker_bars[date_str]
+        try:
+            ov = float(b.get("open", 0))
+            hv = float(b.get("high", 0))
+            lv = float(b.get("low", 0))
+            cv = float(b.get("close", 0))
+            vv = b.get("volume", 0)
+            if not all(math.isfinite(v) for v in (ov, hv, lv, cv)):
+                continue
+            if any(v <= 0 for v in (ov, hv, lv, cv)):
+                # Skip zero/negative OHLC (halted/delisted bad print) rather
+                # than writing a bar that Lean would treat as valid.
+                continue
+            vv_int = int(float(vv)) if vv is not None else 0
+            if not math.isfinite(vv_int):
+                vv_int = 0
+        except (TypeError, ValueError):
+            continue
         time_str = date_str.replace("-", "")
-        o = int(round(float(b["open"]) * 10000))
-        h = int(round(float(b["high"]) * 10000))
-        l = int(round(float(b["low"]) * 10000))
-        c = int(round(float(b["close"]) * 10000))
-        buf.write(f"{time_str} 00:00,{o},{h},{l},{c},{int(b.get('volume', 0))}\n")
+        o = int(round(ov * 10000))
+        h = int(round(hv * 10000))
+        l = int(round(lv * 10000))
+        c = int(round(cv * 10000))
+        buf.write(f"{time_str} 00:00,{o},{h},{l},{c},{vv_int}\n")
     csv_content = buf.getvalue()
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    # Atomic write: write to temp then replace
+    tmp = zip_path.with_suffix(".tmp.zip")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{ticker}.csv", csv_content)
+    tmp.replace(zip_path)
 
 
 def _write_map_file(map_path: Path, ticker: str, ticker_bars: dict) -> None:
     """Write a QC map file for the ticker (see map_files/aapl.csv).
 
-    Format: <YYYYMMDD>,<ticker>,Q  — first and last bar dates.
+    Format: <YYYYMMDD>,<fromTicker>,<toTicker>. We never rename,
+    so write a valid identity mapping (start/end -> ticker). The previous
+    ",Q" rows were malformed and could mis-map the symbol.
     """
     dates = sorted(ticker_bars.keys())
     if not dates:
         return
     start = dates[0].replace("-", "")
     end = dates[-1].replace("-", "")
-    # QC map-file format: <YYYYMMDD>,<fromTicker>,<toTicker>. We never rename,
-    # so write a valid identity mapping (start/end -> ticker). The previous
-    # ",Q" rows were malformed and could mis-map the symbol.
-    content = f"{start},{ticker},{ticker}\n{end},{ticker},{ticker}\n"
+    # Deduplicate single-bar ticker (start==end)
+    if start == end:
+        content = f"{start},{ticker},{ticker}\n"
+    else:
+        content = f"{start},{ticker},{ticker}\n{end},{ticker},{ticker}\n"
     map_path.write_text(content, encoding="utf-8")

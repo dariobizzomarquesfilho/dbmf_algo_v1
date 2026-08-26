@@ -273,9 +273,13 @@ def test_validate_per_member_fail_missing(tmp_path):
     bars = {"AAPL": {"2019-01-14": _bar()["2020-01-01"], "2026-08-01": _bar()["2020-01-01"]}}
     bars_path = _write_bars(tmp_path, bars)
     csv_path = _member_csv(tmp_path, "AAPL,1996-01-02,\nBK,2020-01-01,\n")
+    # BK is in the tradeable (fundamentals) universe, so its missing bars must fail.
+    fund_path = str(tmp_path / "fundamentals_history.json")
+    (tmp_path / "fundamentals_history.json").write_text(json.dumps({"AAPL": {}, "BK": {}}))
 
-    with pytest.raises(SystemExit):
-        ed.validate_data_coverage(bars_path, fundamentals_path=None, membership_csv_path=csv_path)
+    # validate_data_coverage returns False (the caller exits) when a current
+    # member in the tradeable universe has no bars.
+    assert ed.validate_data_coverage(bars_path, fundamentals_path=fund_path, membership_csv_path=csv_path) is False
 
 
 def test_validate_per_member_fail_out_of_range(tmp_path):
@@ -287,6 +291,8 @@ def test_validate_per_member_fail_out_of_range(tmp_path):
     }
     bars_path = _write_bars(tmp_path, bars)
     csv_path = _member_csv(tmp_path, "AAPL,1996-01-02,\nBK,2020-01-01,\n")
+    # BK is in the tradeable (fundamentals) universe, so its out-of-range bars must fail.
+    fund_path = str(tmp_path / "fundamentals_history.json")
+    (tmp_path / "fundamentals_history.json").write_text(json.dumps({"AAPL": {}, "BK": {}}))
 
-    with pytest.raises(SystemExit):
-        ed.validate_data_coverage(bars_path, fundamentals_path=None, membership_csv_path=csv_path)
+    assert ed.validate_data_coverage(bars_path, fundamentals_path=fund_path, membership_csv_path=csv_path) is False

@@ -10,6 +10,7 @@ from .config import (
     HISTORY_START,
     HISTORY_START_DATE,
     TIINGO_API_KEY,
+    get_tiingo_keys,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "HISTORY_START",
     "HISTORY_START_DATE",
     "TIINGO_API_KEY",
+    "get_tiingo_keys",
 ]

@@ -7,9 +7,7 @@ Each inner CSV has columns: date time, open, high, low, close, volume
 
 from __future__ import annotations
 
-import csv
 import json
-import os
 import sys
 import zipfile
 from io import StringIO
@@ -30,23 +28,42 @@ def convert(bars_json_path: str, output_dir: str):
         if i % 20 == 0:
             print(f"  Converted {i}/{len(bars)} tickers...", file=sys.stderr)
 
+        import math
         buf = StringIO()
         # QuantConnect equity daily CSVs store OHLC pre-multiplied by 10000 (4
         # decimals of dollar precision); Lean divides by 1/10000 on read via
         # TradeBar.ParseEquity. Write scaled ints so fills/pricing are correct.
         for date_str in sorted(ticker_bars.keys()):
             b = ticker_bars[date_str]
+            try:
+                ov = float(b.get("open", 0))
+                hv = float(b.get("high", 0))
+                lv = float(b.get("low", 0))
+                cv = float(b.get("close", 0))
+                if not all(math.isfinite(v) and v > 0 for v in (ov, hv, lv, cv)):
+                    continue
+                vv = b.get("volume", 0)
+                try:
+                    vv_int = int(float(vv)) if vv is not None else 0
+                except (TypeError, ValueError):
+                    vv_int = 0
+            except (TypeError, ValueError):
+                continue
             time_str = date_str.replace("-", "")
-            o = int(round(float(b["open"]) * 10000))
-            h = int(round(float(b["high"]) * 10000))
-            l = int(round(float(b["low"]) * 10000))
-            c = int(round(float(b["close"]) * 10000))
-            buf.write(f"{time_str} 00:00,{o},{h},{l},{c},{int(b.get('volume', 0))}\n")
+            o = int(round(ov * 10000))
+            h = int(round(hv * 10000))
+            l = int(round(lv * 10000))
+            c = int(round(cv * 10000))
+            buf.write(f"{time_str} 00:00,{o},{h},{l},{c},{vv_int}\n")
 
         csv_content = buf.getvalue()
+        if not csv_content.strip():
+            continue
         zip_path = out_dir / f"{ticker.lower()}.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        tmp = zip_path.with_suffix(".tmp.zip")
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(f"{ticker.lower()}.csv", csv_content)
+        tmp.replace(zip_path)
 
     print(f"Done. Created {len(bars)} .zip files in {out_dir}")
 

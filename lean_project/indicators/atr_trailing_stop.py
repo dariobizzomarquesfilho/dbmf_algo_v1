@@ -60,9 +60,17 @@ def compute_atr_trailing_stop(
     recent = sorted_dates[-(period + 5):]
     bars = [ticker_bars[d] for d in recent]
 
-    close_prices = [b["close"] for b in bars]
-    high_prices = [b["high"] for b in bars]
-    low_prices = [b["low"] for b in bars]
+    try:
+        close_prices = [float(b["close"]) for b in bars]
+        high_prices = [float(b["high"]) for b in bars]
+        low_prices = [float(b["low"]) for b in bars]
+    except (TypeError, ValueError, KeyError):
+        return None
+    import math
+    if not all(math.isfinite(v) and v > 0 for v in close_prices):
+        return None
+    if not all(math.isfinite(v) for v in high_prices + low_prices):
+        return None
 
     if len(close_prices) < 2:
         return None
@@ -78,18 +86,24 @@ def compute_atr_trailing_stop(
         return None
 
     recent_tr = tr_values[-period:]
-    if smoothing == "SMA" or smoothing == "0":
+    # Normalize smoothing string
+    sm = str(smoothing).upper().strip() if smoothing is not None else "SMA"
+    if sm in ("SMA", "0"):
         atr = sum(recent_tr) / len(recent_tr)
-    elif smoothing == "EMA":
+    elif sm == "EMA":
         atr = _ema(recent_tr, period)
-    elif smoothing == "WMA":
+    elif sm == "WMA":
         atr = _wma(recent_tr, period)
-    elif smoothing == "RMA":
+    elif sm == "RMA":
         atr = _rma(recent_tr, period)
     else:
         atr = sum(recent_tr) / len(recent_tr)
 
+    if not math.isfinite(atr) or atr <= 0:
+        return None
     raw_stop = close_prices[-1] - multiplier * atr
+    # Floor at 0 — a negative stop never triggers and is meaningless
+    raw_stop = max(0.0, raw_stop)
 
     # Ratchet logic: stop only goes up. If prev_stop exists and price
     # hasn't breached it, lock in the higher level. If price breached

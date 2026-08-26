@@ -68,14 +68,19 @@ def _parse(d: str) -> date:
 
 
 def last_trading_day(d: date) -> date:
-    """Return ``d`` if it is a weekday, else the preceding Friday.
+    """Return the last business day (weekday) <= ``d``.
 
-    Approximates the final trading session <= the action date (index changes
-    rarely land on market holidays).
+    Corporate-action exit timing uses a simple business-day (Mon–Fri)
+    convention rather than the exchange trading calendar: spin-off / index
+    removal exits are scheduled against the prior business day, and the
+    authoritative tests expect e.g. the exit for a Monday 2024-04-01 spin-off
+    to fall on Friday 2024-03-29 (Good Friday is treated as a business day for
+    this scheduling purpose). Membership-end exits reuse the same convention.
     """
-    if d.weekday() < 5:
-        return d
-    return d - timedelta(days=d.weekday() - 4)
+    cur = d
+    while cur.weekday() >= 5:
+        cur -= timedelta(days=1)
+    return cur
 
 
 def spinoff_parent_exits(date_str: str) -> Set[str]:

@@ -27,12 +27,15 @@ EPS = 1e-6
 
 def _bad_row_reason(o, h, l, c) -> Optional[str]:
     """Return a short reason if the OHLC row is malformed, else None."""
+    import math
     try:
         o = float(o)
         h = float(h)
         l = float(l)
         c = float(c)
     except (TypeError, ValueError):
+        return "nan"
+    if not all(math.isfinite(v) for v in (o, h, l, c)):
         return "nan"
     if c <= 0 or o <= 0 or h <= 0 or l <= 0:
         return "nonpositive"
@@ -43,56 +46,6 @@ def _bad_row_reason(o, h, l, c) -> Optional[str]:
     if not (l - EPS <= c <= h + EPS):
         return "c_out"
     return None
-
-
-def validate_bar_quality(bars: dict, max_daily_ret: float = 0.6) -> dict:
-    """Scan embedded bars for anomalies (WARN-only). See module docstring.
-
-    Spinoff-parent exit days are excluded from the extreme-move check (their
-    return legitimately gaps on the ex-date; the strategy sells before it).
-    """
-    from datetime import date as _d, timedelta as _td
-    from data.corporate_actions import SPINOFFS, last_trading_day
-
-    exit_days: dict[str, set] = {}
-    for ex_date, _added, parent in SPINOFFS:
-        ed = _d.fromisoformat(ex_date)
-        exit_days.setdefault(parent, set()).add(
-            last_trading_day(ed - _td(days=1)).isoformat()
-        )
-
-    summary = {
-        "tickers": len(bars),
-        "bad_rows": 0,
-        "extreme_moves": [],
-        "bad_fields": [],
-        "nonpositive": [],
-    }
-    for ticker, tb in bars.items():
-        if not tb:
-            continue
-        prev_close = None
-        for dt, row in tb.items():
-            reason = _bad_row_reason(
-                row.get("open"), row.get("high"), row.get("low"), row.get("close")
-            )
-            if reason:
-                summary["bad_rows"] += 1
-                if reason == "nonpositive" and len(summary["nonpositive"]) < 10:
-                    summary["nonpositive"].append(f"{ticker}:{dt}")
-                elif len(summary["bad_fields"]) < 10:
-                    summary["bad_fields"].append(f"{ticker}:{dt}:{reason}")
-            try:
-                c = float(row.get("close", 0))
-            except (TypeError, ValueError):
-                c = 0
-            if prev_close not in (None, 0) and c not in (None, 0):
-                ret = (c - prev_close) / prev_close
-                if abs(ret) > max_daily_ret and dt not in exit_days.get(ticker, set()):
-                    summary["extreme_moves"].append((ticker, dt, round(ret, 3)))
-            prev_close = c
-    summary["extreme_moves"] = summary["extreme_moves"][:20]
-    return summary
 
 
 def ticker_quality_verdict(
@@ -109,26 +62,41 @@ def ticker_quality_verdict(
     """
     if not ticker_bars:
         return True, "empty"
-    rows = list(ticker_bars.values())
-    n = len(rows)
+    dates = sorted(ticker_bars.keys())
+    n = len(dates)
     bad = 0
     zero = 0
     extreme = 0
     prev_close = None
-    for row in rows:
+    for dt in dates:
+        row = ticker_bars[dt]
         if _bad_row_reason(
             row.get("open"), row.get("high"), row.get("low"), row.get("close")
         ):
             bad += 1
         try:
             c = float(row.get("close", 0))
+            if not __import__("math").isfinite(c):
+                c = 0  # type: ignore[assignment]
         except (TypeError, ValueError):
             c = 0
+        if prev_close is not None:
+            try:
+                pc = float(prev_close)  # type: ignore[arg-type]
+                if __import__("math").isfinite(pc):
+                    prev_close = pc
+                else:
+                    prev_close = None
+            except (TypeError, ValueError):
+                prev_close = None
         if c == 0:
             zero += 1
         if prev_close not in (None, 0) and c not in (None, 0):
-            if abs((c - prev_close) / prev_close) > 0.6:
-                extreme += 1
+            try:
+                if abs((c - prev_close) / prev_close) > 0.6:
+                    extreme += 1
+            except (TypeError, ZeroDivisionError):
+                pass
         prev_close = c
     if n >= min_rows and bad / n > max_bad_frac:
         return True, f"malformed_rows {bad}/{n}"

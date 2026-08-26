@@ -45,6 +45,13 @@ from data.sp500_data import (
     build_alias_map,
 )
 
+# Add this scripts dir to path so `from common import ...` works both when run
+# directly (scripts/ on sys.path[0]) and when imported as scripts.repair_*.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from common import load_fundamentals_tickers
+
 _DATA_DIR = _LEAN_PROJECT / "data"
 _BARS_PATH = _DATA_DIR / "equity_bars.json"
 
@@ -220,7 +227,9 @@ def main() -> None:
 
     csvp = _DATA_DIR / "sp500_ticker_start_end.csv"
     membership = load_sp500_membership(str(csvp))
-    requested = sorted(membership.keys()) + ["^TNX", "^GSPC"]
+    # Only attempt to recover tickers that are in the tradeable universe
+    # (fundamentals members, always including the required ^TNX/^GSPC indices).
+    requested = sorted(load_fundamentals_tickers())
 
     HISTORY_START = config.HISTORY_START
     BACKTEST_END = config.BACKTEST_END

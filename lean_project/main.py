@@ -12,11 +12,11 @@ All positions equal-weight (1/max_positions).
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
 from AlgorithmImports import *
-from data.sp500_data import load_sp500_membership
+from data.sp500_data import intervals_active
 from data.corporate_actions import corporate_action_exits
 from universe.pb_roe_universe import run_fine_selection, log_missing_g_eps_summary
 from indicators.atr_trailing_stop import compute_atr_trailing_stop
@@ -51,18 +51,38 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self.SetEndDate(end_y, end_m, end_d)
 
         # Load all data from embedded modules (no disk I/O, Docker-safe)
-        self.bars_cache = load_equity_bars()
+        try:
+            self.bars_cache = load_equity_bars()
+        except (ImportError, FileNotFoundError) as _e:
+            raise RuntimeError(
+                "data module 'equity_bars' is missing — run "
+                "lean_project/scripts/embed_data.py before backtesting"
+            ) from _e
         try:
             from data.fundamentals_history import load_fundamentals_history
             self.fundamentals_history = load_fundamentals_history()
-        except ImportError:
-            self.fundamentals_history = {}
+        except ImportError as _e:
+            raise RuntimeError(
+                "data module 'fundamentals_history' is missing — run "
+                "lean_project/scripts/embed_data.py before backtesting"
+            ) from _e
         try:
             from data.damodaran_erp_history import load_damodaran_erp_history
             self.erp_history_cache = load_damodaran_erp_history()
-        except ImportError:
-            self.erp_history_cache = {}
+        except ImportError as _e:
+            raise RuntimeError(
+                "data module 'damodaran_erp_history' is missing — run "
+                "lean_project/scripts/embed_data.py before backtesting"
+            ) from _e
         self.market_bars = self.bars_cache.get("^GSPC", {})
+        if not self.market_bars:
+            msg = (
+                "MARKET BARS MISSING: ^GSPC not in embedded equity_bars — "
+                "rolling_beta will always return None and the screen will be empty. "
+                "Re-run download_equity_data.py then embed_data.py."
+            )
+            self.Error(msg)
+            raise RuntimeError(msg)
 
         # Guard: fail loudly if embedded equity bars don't cover the
         # configured backtest window (a stale regeneration would otherwise
@@ -80,40 +100,59 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 - datetime.strptime(_latest, "%Y-%m-%d").date()
             ).days
             if _earliest > window["start"] or _tail_gap > 4:
-                self.Error(
+                msg = (
                     "EQUITY BAR COVERAGE MISMATCH: embedded bars span "
                     f"{_earliest}..{_latest} but backtest window is "
                     f"{window['start']}..{window['end']}. Re-run "
                     "download_equity_data.py then embed_data.py."
                 )
+                self.Error(msg)
+                raise RuntimeError(msg)
 
         # Guard: fail loudly if the embedded fundamentals universe is too thin.
         # A stale/shrunk embed (e.g. only AAPL/MSFT) would silently cap the
         # screen to those names and produce a ~2-ticker backtest with no error.
         _fh_count = len(self.fundamentals_history)
         if _fh_count < 100:
-            self.Error(
+            msg = (
                 "FUNDAMENTALS UNIVERSE TOO SMALL: embedded fundamentals_history "
                 f"covers only {_fh_count} symbols (expected >= 100). A stale build "
                 "produced a near-empty universe. Re-run download_edgartools_data.py "
                 "then embed_data.py before backtesting."
             )
+            self.Error(msg)
+            raise RuntimeError(msg)
 
         # Load S&P 500 PIT membership
         import csv
         from pathlib import Path
         sp500_csv = Path(__file__).resolve().parent / "data" / "sp500_ticker_start_end.csv"
         self.sp500_membership = {}
-        if sp500_csv.exists():
-            with open(sp500_csv, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    ticker = row["ticker"].strip()
-                    if not ticker:
-                        continue
-                    start = row["start_date"].strip()
-                    end = row["end_date"].strip() or None
-                    self.sp500_membership.setdefault(ticker, []).append((start, end))
+        if not sp500_csv.exists():
+            raise RuntimeError(
+                f"S&P 500 membership CSV not found at {sp500_csv} — "
+                "run scripts/download_equity_data.py --refresh-sp500 or restore the file."
+            )
+        with open(sp500_csv, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None or "ticker" not in [h.strip().lower() for h in reader.fieldnames]:
+                raise RuntimeError(f"Invalid S&P membership CSV header: {reader.fieldnames}")
+            # Normalize fieldnames to lower for BOM/case robustness
+            for row in reader:
+                try:
+                    ticker = (row.get("ticker") or row.get("Ticker") or "").strip()
+                    start = (row.get("start_date") or row.get("Start_date") or "").strip()
+                    end_raw = (row.get("end_date") or row.get("End_date") or "")
+                    end = end_raw.strip() or None
+                except (AttributeError, KeyError) as e:
+                    raise RuntimeError(f"Malformed row in {sp500_csv}: {row}") from e
+                if not ticker:
+                    continue
+                if not start:
+                    raise RuntimeError(f"Missing start_date for {ticker} in {sp500_csv}")
+                self.sp500_membership.setdefault(ticker, []).append((start, end))
+        if not self.sp500_membership:
+            raise RuntimeError(f"S&P membership CSV empty: {sp500_csv}")
 
         # Bootstrap equity CSV.zip files from embedded bars so Lean's data feed
         # has bars (time loop only advances on data events).
@@ -130,10 +169,13 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         # 10s security-initialization limit, so we only subscribe the members
         # active as of the start date here, and dynamically AddEquity() each
         # remaining member on the day its membership begins (see
-        # _ensure_subscribed / OnData). Entry/exit is enforced by CoarseSelection.
+        # _ensure_subscribed / OnData). Entry (index add) and exit (membership
+        # end / corporate action) are enforced in DailyRebalance.
         self._registered = []
         self._subscribed = set()  # every ticker we have ever AddEquity()'d
-        date_str = self.Time.strftime("%Y-%m-%d")
+        # In Initialize, self.Time is not yet the backtest start — use the
+        # configured window directly to avoid day-1 subscription drift.
+        date_str = window["start"]
         skipped_no_bars = []
         for ticker, entries in self.sp500_membership.items():
             if ticker == "^TNX":
@@ -145,7 +187,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 continue
             # Only pre-subscribe members active as of the start date; later
             # additions are handled dynamically in _ensure_subscribed().
-            if not any(start <= date_str and (end is None or date_str <= end) for start, end in entries):
+            if not intervals_active(entries, date_str):
                 continue
             try:
                 self.AddEquity(ticker, Resolution.Daily)
@@ -163,7 +205,6 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self.selected_symbols = set()
         self.sell_dates = {}  # symbol_str -> date_str when last liquidated (cooldown)
         self.last_rebalance_date = None
-        self._cached_selection = None
         self._symbols = {
             ticker: Symbol.Create(ticker, SecurityType.Equity, Market.USA)
             for ticker in self._registered
@@ -181,6 +222,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         during scheduled events. Set it explicitly from embedded bars so
         SetHoldings/Liquidate/ATR checks all use correct prices.
         """
+        import math
         date_str = self.Time.strftime("%Y-%m-%d")
         if symbol_strs is None:
             symbol_strs = self._registered
@@ -191,55 +233,28 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             bar = self.bars_cache.get(symbol_str, {}).get(date_str)
             if bar is None:
                 continue
+            try:
+                o = float(bar["open"]); h = float(bar["high"])
+                l = float(bar["low"]); c = float(bar["close"])
+                v = float(bar.get("volume", 0) or 0)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if not all(math.isfinite(x) for x in (o, h, l, c, v)):
+                continue
+            if any(x <= 0 for x in (o, h, l, c)):
+                continue
             trade = TradeBar()
             trade.Symbol = symbol
             trade.Time = self.Time
-            trade.Open = float(bar["open"])
-            trade.High = float(bar["high"])
-            trade.Low = float(bar["low"])
-            trade.Close = float(bar["close"])
-            trade.Volume = float(bar.get("volume", 0))
+            trade.Open = o
+            trade.High = h
+            trade.Low = l
+            trade.Close = c
+            trade.Volume = v
             self.Securities[symbol].SetMarketPrice(trade)
 
     # ------------------------------------------------------------------
-    # Universe selection
-    # ------------------------------------------------------------------
-    def _is_sp500_member(self, ticker: str, date_str: str) -> bool:
-        entries = self.sp500_membership.get(ticker, [])
-        for start, end in entries:
-            if start <= date_str and (end is None or date_str <= end):
-                return True
-        return False
-
-    def CoarseSelection(self, coarse):
-        """Filter to S&P 500 constituents active as of today."""
-        date_str = self.Time.strftime("%Y-%m-%d")
-        return [
-            c.Symbol for c in coarse
-            if self._is_sp500_member(c.Symbol.Value, date_str)
-        ]
-
-    def FineSelection(self, fine):
-        """Screen with embedded fundamentals (no QC paid feed, no disk I/O).
-
-        Fully point-in-time: fundamentals, beta, rf, and ERP are all
-        looked up as-of the current backtest date (no look-ahead).
-        """
-        tickers = [f.Symbol.Value for f in fine]
-        self._cached_selection = run_fine_selection(
-            algorithm=self,
-            tickers=tickers,
-            max_positions=self.max_positions,
-            bars_cache=self.bars_cache,
-            history_cache=self.fundamentals_history,
-            market_bars=self.market_bars,
-            erp_history_cache=self.erp_history_cache,
-        )
-        return self._cached_selection
-
-    # ------------------------------------------------------------------
-    # Rebalance trigger (OnData-based, replaces AfterMarketClose schedule
-    # which only fires once with daily data in this Lean setup)
+    # Rebalance trigger
     # ------------------------------------------------------------------
     def OnData(self, data):
         """Trigger daily rebalance on each new trading day."""
@@ -265,10 +280,12 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 continue
             if ticker not in self.bars_cache:
                 continue
-            # Subscribe any membership interval that has already started (<= today).
-            # Using <= (not ==) guarantees a name whose start date falls on a
-            # weekend/holiday is still caught up on the next trading day.
-            if any(start <= date_str for start, _ in entries):
+            # Subscribe only intervals that are actually active on ``date_str``.
+            # ``intervals_active`` requires start <= today AND (end is None or
+            # today <= end), so historical members that exited long before the
+            # backtest never get subscribed (subscribing dead members would blow
+            # Lean's subscription budget and re-introduce the day-1 spike).
+            if intervals_active(entries, date_str):
                 try:
                     self.AddEquity(ticker, Resolution.Daily)
                     self._registered.append(ticker)
@@ -301,16 +318,16 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         date_str = self.Time.strftime("%Y-%m-%d")
         self.Log(f"DailyRebalance {date_str} — positions={len(self.selected_symbols)}")
 
-        # Corporate-action exits run at the very start of the rebalance, before
-        # ATR stops and before any screen, so we never hold a renamed/delisted
-        # or spinoff-parent position into the action day.
+        # Ensure every security has a price before deciding exits (otherwise
+        # Liquidate may fill at stale 0). Corporate actions and ATR stops both
+        # need the correct bar close.
+        self._ensure_prices()
+
+        # Corporate-action exits (rename/merger/spinoff) — only stop+corporate liquidate
         exits = self._corporate_action_exits(date_str)
         for sym in list(self.selected_symbols):
             if sym in exits:
                 self._liquidate_symbol(sym)
-
-        # Ensure every security has a price (feed may lag Security.Price)
-        self._ensure_prices()
 
         # Check ATR stops on existing positions (cheap: prices + ATR only,
         # no fundamentals/beta regression)
@@ -320,14 +337,21 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         # runs ONLY when a buy opportunity exists: a slot is free (initial
         # fill or a stop just freed one). Fully-held days skip it entirely.
         if len(self.selected_symbols) < self.max_positions:
-            # Always run a FRESH point-in-time screen. Reusing FineSelection's
-            # cached result here freezes the portfolio on the day-1 picks and
-            # prevents any rotation once slots free up (root cause of the
-            # 12-order backtest: after the initial names stopped out, the same
-            # stale 10 names were retried forever, all in cooldown -> deadlock).
+            # Always run a FRESH point-in-time screen over the full
+            # fundamentals universe. Caching a day-1 selection would freeze
+            # the portfolio and prevent any rotation once slots free up
+            # (root cause of the 12-order backtest: after the initial names
+            # stopped out, the same stale 10 names were retried forever, all
+            # in cooldown -> deadlock).
+            # Filter to tickers that are actually S&P 500 members on this date
+            # to prevent historical/future non-members from filling screen slots.
+            pit_tickers = [
+                t for t in self.fundamentals_history.keys()
+                if intervals_active(self.sp500_membership.get(t, []), date_str)
+            ] if self.sp500_membership else list(self.fundamentals_history.keys())
             selected = run_fine_selection(
                 algorithm=self,
-                tickers=list(self.fundamentals_history.keys()),
+                tickers=pit_tickers,
                 max_positions=self.max_positions,
                 bars_cache=self.bars_cache,
                 history_cache=self.fundamentals_history,
@@ -335,19 +359,23 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 erp_history_cache=self.erp_history_cache,
             )
 
+            # Spec: only ATR stops (and corporate actions above) liquidate.
+            # Empty screen (gap<=0 everywhere) means no new buys — preserve
+            # current holdings and retry next day. ERP failures already emit
+            # ERROR inside run_fine_selection; we just skip buys here.
+            if not selected:
+                self.Log(f"DailyRebalance {date_str}: empty screen (no gap>0) — no new buys, preserving {len(self.selected_symbols)} holdings")
+                return
+
             # Never re-add a ticker that has a corporate-action exit today
             # (rename/merger/delisting or spinoff parent) within the same cycle.
             selected = [s for s in selected if s not in exits]
 
-            selected_set = set(selected)
-
-            # Liquidate removed positions
-            for symbol_str in list(self.selected_symbols):
-                if symbol_str not in selected_set:
-                    self._liquidate_symbol(symbol_str)
+            if not selected:
+                self.Log(f"DailyRebalance {date_str}: all screened tickers have corporate exits today — no new buys")
+                return
 
             # Add new positions
-            from datetime import datetime, timedelta
             today = self.Time.date()
             added = set()
             for symbol_str in selected:
@@ -360,19 +388,25 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                     if (today - sold_date) < timedelta(days=self.cooldown_days):
                         continue
                 symbol = self._symbols.get(symbol_str)
-                if symbol is None or symbol not in self.Securities or not self.Securities[symbol].HasData:
+                # HasData is Lean's data-feed flag and stays False until the
+                # next bar arrives, even though we inject today's price via
+                # SetMarketPrice. Check the embedded bar directly to avoid a
+                # 1-day entry lag on index-add names.
+                has_bar = symbol is not None and self.bars_cache.get(symbol_str, {}).get(date_str) is not None
+                if symbol is None or symbol not in self.Securities or not has_bar:
                     self.Log(f"SKIP {symbol_str}: no price data yet")
                     continue
-                weight = 1.0 / max(len(selected), 1)
+                weight = 1.0 / self.max_positions
                 self.SetHoldings(symbol, weight)
                 self.trailing_stops[symbol_str] = self._compute_stop(symbol_str)
                 self.Log(f"Added {symbol_str} @ {weight:.1%}")
                 added.add(symbol_str)
 
-            # Track ONLY the names we actually hold or just added — NOT the full
-            # screen target. Otherwise un-fillable (no-data) picks pin the book
-            # at max_positions and freeze every future re-screen.
-            self.selected_symbols = (self.selected_symbols & selected_set) | added
+            # Spec: only stops/corporate actions remove holdings — not valuation
+            # turnover. So we keep existing holdings and just add new fills.
+            # Un-fillable (no-data) picks do not pin the book because they
+            # are simply not added (added set excludes them).
+            self.selected_symbols = (self.selected_symbols | added)
 
     # ------------------------------------------------------------------
     # ATR stops
@@ -403,6 +437,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 self.Log(f"ATR STOP: {symbol_str} price={price:.2f} stop={stop:.2f} LIQUIDATE")
                 self.Liquidate(symbol)
                 self.selected_symbols.discard(symbol_str)
+                self.trailing_stops.pop(symbol_str, None)
                 self.sell_dates[symbol_str] = date_str  # start cooldown
             else:
                 self.Log(f"STOP CHECK {symbol_str} {date_str}: price={price:.2f} stop={stop:.2f} OK")

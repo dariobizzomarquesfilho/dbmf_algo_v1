@@ -42,7 +42,7 @@ REGULAR_FIELD_LABELS = [
     ("CDS", "sovereign_cds_net", False),
     ("Sovereign", "sovereign_cds_net", False),
     ("Total Equity Risk Premium 2", "total_equity_risk_premium2", False),
-    ("Total Equity Risk Premium 3", "country_risk_premium3", False),
+    ("Total Equity Risk Premium 3", "total_equity_risk_premium3", False),
     # Legacy (~2000-era) layouts: "Total Risk Premium" / "Adj. Default Spread"
     ("Total Risk Premium", "total_equity_risk_premium", False),
     ("Adj. Default Spread", "rating_default_spread", False),
@@ -263,29 +263,46 @@ def _parse_human_date(text: str) -> str | None:
 def _cell_to_date_str(value, book=None) -> str | None:
     """Convert a date cell value to 'YYYY-MM-DD'.
 
-    Handles openpyxl datetime objects, xlrd float serial dates, and
+    Handles openpyxl datetime objects, xlrd float/int serial dates, and
     human-readable text.  Returns None if unparseable.
     """
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d")
     if isinstance(value, str):
-        # openpyxl sometimes yields "2026-07-09 00:00:00"
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value or ""):
-            value = value.split(" ")[0]
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
-            return value
-        # xlrd sometimes stores the date serial as text, e.g. "44196.0".
-        sv = value.strip().replace(".0", "")
+        # openpyxl sometimes yields "2026-07-09 00:00:00" or with microseconds
+        s = value.strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}.*", s):
+            s = s.split(" ")[0].split("T")[0]
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+                return s
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            return s
+        # xlrd sometimes stores the date serial as text, e.g. "44196.0" or "44196.00"
+        # Strip trailing .0 variants robustly
+        sv = s
+        # Remove trailing .0+ (e.g. 44196.00 -> 44196)
+        if "." in sv:
+            try:
+                fv = float(sv)
+                if fv == int(fv):
+                    sv = str(int(fv))
+                else:
+                    # Fractional serial (half-day) — truncate to int days
+                    sv = str(int(fv))
+            except ValueError:
+                pass
         if sv.lstrip("-").isdigit() and 30000 < int(sv) < 60000:
             from datetime import timedelta as _td
 
             return (datetime(1899, 12, 30) + _td(days=int(sv))).strftime("%Y-%m-%d")
-        return _parse_human_date(value)
-    if isinstance(value, float) and book is not None:
+        return _parse_human_date(s)
+    if isinstance(value, (int, float)) and book is not None:
         try:
             import xlrd as _xlrd
 
-            y, mo, d, _, _, _ = _xlrd.xldate.xldate_as_tuple(value, book.datemode)
+            # xlrd datemode is only on xlrd Book; openpyxl Workbook has no datemode
+            datemode = getattr(book, "datemode", 0)
+            y, mo, d, _, _, _ = _xlrd.xldate.xldate_as_tuple(float(value), datemode)
             return datetime(y, mo, d).strftime("%Y-%m-%d")
         except Exception:
             return None
@@ -369,7 +386,6 @@ def _detect_layout(rows: _SheetRows) -> dict:
         # Frontier header: mentions 'prs' and 'erp' / frontier section header.
         if "frontier" in joined and frontier_header_row is None:
             # The frontier *section* header row; real column header is usually the next row.
-            frontier_section_row = i
             # Look at the next non-empty row for the frontier column header.
             for j in range(i, min(i + 3, len(all_rows))):
                 nxt = all_rows[j]
@@ -510,17 +526,18 @@ def _extract_regular_countries(rows: _SheetRows, layout: dict) -> tuple[dict, in
     if header_row is None:
         return countries, 0
 
-    frontier_section_row = layout.get("frontier_header_row")
-
     for i, row in enumerate(rows.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1):
         first_col = row[0] if len(row) > 0 else None
 
-        # Stop at empty row (footer territory)
+        # Empty first-col is not necessarily footer — could be a blank
+        # separator row. Skip it instead of aborting (footer is detected by
+        # consecutive empties or reaching end, but a single blank should not
+        # truncate the table).
         if first_col is None or (isinstance(first_col, str) and not first_col.strip()):
-            break
+            continue
 
-        # Stop when we hit the frontier markets section
-        if isinstance(first_col, str) and "Frontier Markets" in first_col:
+        # Stop when we hit the frontier markets section (case-insensitive)
+        if isinstance(first_col, str) and "frontier markets" in first_col.lower():
             break
 
         # Skip non-country rows (e.g. the frontier header is separate; section header handled above)
@@ -562,8 +579,8 @@ def _extract_frontier_countries(rows: _SheetRows, layout: dict) -> tuple[dict, i
     for i, row in enumerate(rows.iter_rows(min_row=1, values_only=True), start=1):
         first_col = row[0] if len(row) > 0 else None
 
-        # Detect the frontier markets section header
-        if isinstance(first_col, str) and "Frontier Markets" in first_col:
+        # Detect the frontier markets section header (case-insensitive)
+        if isinstance(first_col, str) and "frontier markets" in first_col.lower():
             started = True
             continue
         if not started:
@@ -573,9 +590,9 @@ def _extract_frontier_countries(rows: _SheetRows, layout: dict) -> tuple[dict, i
         if i < fheader_row:
             continue
 
-        # Empty row = footer starts after frontier section
+        # Empty row in frontier section — skip, don't break (blank separator)
         if first_col is None or (isinstance(first_col, str) and not first_col.strip()):
-            break
+            continue
 
         if not isinstance(first_col, str):
             continue

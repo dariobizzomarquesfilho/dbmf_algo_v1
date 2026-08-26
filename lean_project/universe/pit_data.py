@@ -46,11 +46,27 @@ def rolling_beta(
     dates = dates[-(window + 1):]
     s = np.array([stock_bars[d]["close"] for d in dates], dtype=float)
     m = np.array([market_bars[d]["close"] for d in dates], dtype=float)
+    # Guard against zero/NaN closes (would produce inf/nan returns)
+    if not np.all(np.isfinite(s)) or not np.all(np.isfinite(m)):
+        return None
+    if np.any(s <= 0) or np.any(m <= 0):
+        return None
     sr = np.diff(s) / s[:-1]
     mr = np.diff(m) / m[:-1]
     if len(sr) < 2:
         return None
-    beta, alpha = np.polyfit(mr, sr, 1)  # beta = slope, alpha = intercept (daily)
+    if not np.all(np.isfinite(sr)) or not np.all(np.isfinite(mr)):
+        return None
+    # Flat market (zero variance) makes polyfit singular — use variance threshold
+    # rather than exact equality (floating noise e.g. 0.001 vs 0.0010000001)
+    if np.var(mr) < 1e-12:
+        return None
+    try:
+        beta, alpha = np.polyfit(mr, sr, 1)  # beta = slope, alpha = intercept (daily)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    if not np.isfinite(beta) or not np.isfinite(alpha):
+        return None
     return float(beta), float(alpha)
 
 
@@ -66,8 +82,11 @@ def erp_as_of(history: dict, date_str: str) -> Optional[dict]:
 
 
 def earliest_erp(history: dict) -> Optional[dict]:
-    """Return the oldest ERP entry (fallback for dates before the series).
+    """Return the oldest ERP entry.
 
+    NOTE: This is look-ahead for dates before the series start — it returns a
+    future ERP.  Callers that require strict PIT should NOT use this as a
+    fallback; prefer ``histimpl_erp_as_of`` or return None.
     Returns None if the history is empty or absent.
     """
     hist = history.get("erp_history", {}) if history else {}
@@ -102,16 +121,22 @@ def resolve_erp_as_of(
 ) -> Optional[dict]:
     """Resolve the ERP entry for ``date_str``, preferring spreadsheet PIT data.
 
-    Returns the spreadsheet entry via ``erp_as_of``/``earliest_erp``.  Falls
-    back to ``histimpl_erp_as_of`` only when the spreadsheet entry is missing or
-    has no usable ``us_erp``.  Always returns an entry with a ``source`` tag
+    Strict PIT: only ``erp_as_of`` (< date_str) is used from the spreadsheet.
+    ``earliest_erp`` is deliberately NOT used as a fallback — it would be
+    look-ahead for dates before the series start.  Falls back to
+    ``histimpl_erp_as_of`` only when the spreadsheet entry is missing or has
+    no usable ``us_erp``.  Always returns an entry with a ``source`` tag
     (``"pit"`` or ``"histimpl-fallback"``) so callers can log the effective source.
     """
-    pit = erp_as_of(spreadsheet_hist, date_str) or earliest_erp(spreadsheet_hist)
+    pit = erp_as_of(spreadsheet_hist, date_str)
     if pit is not None and isinstance(pit.get("us_erp"), (int, float)):
-        return {"us_erp": pit["us_erp"],
-                "mature_market_erp": pit.get("mature_market_erp"),
-                "source": "pit"}
+        # Exclude bool (subclass of int) which would be 0/1 ERP
+        if isinstance(pit["us_erp"], bool):
+            pit = None
+        else:
+            return {"us_erp": pit["us_erp"],
+                    "mature_market_erp": pit.get("mature_market_erp"),
+                    "source": "pit"}
 
     hi = histimpl_erp_as_of(histimpl_hist, date_str)
     if hi is not None:
@@ -125,3 +150,26 @@ def resolve_erp_as_of(
                 "mature_market_erp": pit.get("mature_market_erp"),
                 "source": "pit"}
     return None
+
+
+def resolve_risk_free_rate(tn_bars: dict, as_of: str) -> float:
+    """Point-in-time risk-free rate (decimal) from ``^TNX`` bars as-of ``as_of``.
+
+    Returns the latest bar close that is ``<= as_of``, divided by 100 exactly
+    once (Yahoo quotes the 10-yr yield index in yield*10). When no bar exists
+    at/before ``as_of`` the dataset is incomplete for that date; we do NOT reach
+    into future bars (that would be look-ahead) and fall back to the configured
+    default instead.
+    """
+    if tn_bars:
+        ds = [d for d in tn_bars if d <= as_of]
+        if ds:
+            try:
+                close = float(tn_bars[max(ds)]["close"])
+            except (TypeError, ValueError):
+                return 0.042
+            # Guard NaN/inf: float('nan') > 0 is False but explicit is clearer
+            import math
+            if math.isfinite(close) and close > 0:
+                return close / 100.0
+    return 0.042

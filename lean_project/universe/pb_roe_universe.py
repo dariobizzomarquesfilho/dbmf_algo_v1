@@ -32,11 +32,10 @@ except ImportError as _e:
     ) from _e
 from universe.pit_data import (
     fundamental_as_of,
-    latest_price_as_of,
     rolling_beta,
     erp_as_of,
-    earliest_erp,
     resolve_erp_as_of,
+    resolve_risk_free_rate,
 )
 
 # Load PIT ERP history if available (embedded damodaran_erp_history.py)
@@ -88,50 +87,60 @@ def is_financial(
     ``business_category`` and ``sic``.  There is deliberately no sector/
     industry keyword fallback — if a company cannot be classified by these
     exact standards it is left as non-financial rather than risked into a
-    bogus valuation.
+    bogus valuation.  ``sic`` is coerced to int to handle legacy string
+    storage (e.g. "6021").
     """
-    if business_category in FINANCIAL_CATEGORIES:
-        return True
+    if business_category is not None:
+        bc = str(business_category).strip()
+        if bc in FINANCIAL_CATEGORIES:
+            return True
     if sic is not None:
+        try:
+            sic_int = int(float(str(sic).strip())) if isinstance(sic, str) else int(sic)
+        except (ValueError, TypeError):
+            return False
         if (
-            sic in FINANCIAL_SIC_BANK
-            or sic in FINANCIAL_SIC_INSURANCE
-            or sic in FINANCIAL_SIC_INVESTMENT_MANAGER
-            or sic in FINANCIAL_SIC_REAL_ESTATE
+            sic_int in FINANCIAL_SIC_BANK
+            or sic_int in FINANCIAL_SIC_INSURANCE
+            or sic_int in FINANCIAL_SIC_INVESTMENT_MANAGER
+            or sic_int in FINANCIAL_SIC_REAL_ESTATE
         ):
             return True
     return False
 
 
-def get_tnx_rate(bars_cache: dict) -> float:
-    """Get latest ^TNX 10-year Treasury yield from local equity bars cache."""
-    tn_bars = bars_cache.get("^TNX", {})
-    if not tn_bars:
-        return 0.042
-    sorted_dates = sorted(tn_bars.keys())
-    latest = sorted_dates[-1]
-    tn_close = float(tn_bars[latest].get("close", 0))
-    if tn_close > 0:
-        return tn_close / 100.0
-    return 0.042
+def get_erp(erp_cache: dict, country: str = "United States") -> Optional[float]:
+    """Get ERP for a country from Damodaran cache.
 
-
-def get_erp(erp_cache: dict, country: str = "United States") -> float:
-    """Get ERP for a country from Damodaran cache."""
-    if country == "United States" and isinstance(erp_cache.get("us_erp"), (int, float)):
-        return float(erp_cache["us_erp"])
-    countries = erp_cache.get("countries", {})
-    cd = countries.get(country, {})
-    # Prefer total_equity_risk_premium2 (more recent/accurate)
-    for field in ("total_equity_risk_premium2", "Total Equity Risk Premium 2",
-                  "total_equity_risk_premium", "Total Equity Risk Premium",
-                  "TotalEquityRiskPremium", "ERP", "erp"):
-        val = cd.get(field)
-        if val is not None and isinstance(val, (int, float)):
-            return float(val)
-    if isinstance(erp_cache.get("mature_market_erp"), (int, float)):
-        return float(erp_cache["mature_market_erp"])
-    return 0.055
+    Returns None if no ERP is available (instead of silent 0.055 fallback).
+    A missing ERP is a data failure and must be surfaced as an error.
+    """
+    us = erp_cache.get("us_erp")
+    if isinstance(us, (int, float)) and not isinstance(us, bool):
+        fv = float(us)
+        # ERP == 0 is a Damodaran fetch failure — treat as missing
+        if fv == 0:
+            return None
+        return fv
+    if country != "United States":
+        countries = erp_cache.get("countries", {})
+        cd = countries.get(country, {})
+        for field in ("total_equity_risk_premium2", "Total Equity Risk Premium 2",
+                      "total_equity_risk_premium", "Total Equity Risk Premium",
+                      "TotalEquityRiskPremium", "ERP", "erp"):
+            val = cd.get(field)
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                fv = float(val)
+                if fv == 0:
+                    return None
+                return fv
+    mature = erp_cache.get("mature_market_erp")
+    if isinstance(mature, (int, float)) and not isinstance(mature, bool):
+        fv = float(mature)
+        if fv == 0:
+            return None
+        return fv
+    return None
 
 
 def _record_missing_g_eps(algorithm, ticker: str, as_of: str) -> None:
@@ -204,10 +213,7 @@ def run_fine_selection(
 
     # PIT risk-free rate: 10-yr yield as-of the backtest date
     tn_bars = bars_cache.get("^TNX", {})
-    tn_close = latest_price_as_of(tn_bars, as_of) if tn_bars else None
-    if tn_close is None:
-        tn_close = get_tnx_rate(bars_cache)  # global latest fallback
-    rf = tn_close / 100.0 if tn_close and tn_close > 0 else 0.042
+    rf = resolve_risk_free_rate(tn_bars, as_of)
 
     # PIT ERP is the sole, authoritative source of truth. There is NO fallback
     # to a current/latest snapshot (that would be look-ahead bias). If neither
@@ -224,6 +230,12 @@ def run_fine_selection(
         )
         return []
     erp = get_erp(entry, "United States")
+    if erp is None or erp == 0:
+        algorithm.Log(
+            f"ERROR: Damodaran ERP missing/zero as_of={as_of} entry={entry} "
+            f"(source={entry.get('source')}) — Damodaran fetch failure. Skipping screen."
+        )
+        return []
     effective_source = entry.get("source", "pit")
     algorithm.Log(
         f"DIAG ERP PIT as_of={as_of} erp={erp:.4f} (source={effective_source})"
@@ -276,15 +288,19 @@ def run_fine_selection(
             bar = ticker_bars.get(as_of)
             if not bar:
                 continue
-            current_price = float(bar.get("close", 0))
-            if current_price <= 0:
+            import math as _math
+            try:
+                current_price = float(bar.get("close", 0))
+            except (TypeError, ValueError):
+                continue
+            if not _math.isfinite(current_price) or current_price <= 0:
                 continue
 
             pb = current_price / book_value
 
             # Growth: PIT EPS CAGR — no fallback, error + skip if unavailable
             g_start = snap.get("g_eps")
-            if g_start is None:
+            if g_start is None or not isinstance(g_start, (int, float)) or not _math.isfinite(float(g_start)):
                 # Record the span and emit one consolidated warning at the end
                 # of the backtest instead of spamming a line every rebalance.
                 _record_missing_g_eps(algorithm, ticker, as_of)
@@ -292,12 +308,17 @@ def run_fine_selection(
 
             g_term = rf
             r = rf + beta * erp
-            implied_pb = intrinsic_pb_2stage(roe, g_start, g_term, r)
+            try:
+                implied_pb = intrinsic_pb_2stage(roe, g_start, g_term, r)
+            except (ValueError, ZeroDivisionError):
+                continue
+            if not _math.isfinite(implied_pb) or implied_pb <= 0:
+                continue
 
             gap_pct = (implied_pb - pb) / pb
             if gap_pct > 0:
                 scored.append((ticker, gap_pct, pb, roe, implied_pb))
-        except Exception:
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
             continue
 
     scored.sort(key=lambda x: x[1], reverse=True)

@@ -23,6 +23,7 @@ import shutil
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,12 @@ _LEAN_PROJECT = _SCRIPT_DIR.parent
 if str(_LEAN_PROJECT) not in sys.path:
     sys.path.insert(0, str(_LEAN_PROJECT))
 from data.sp500_data import load_sp500_membership, clip_to_membership
+
+# Add this scripts dir to path so `from common import ...` works both when run
+# directly (scripts/ on sys.path[0]) and when imported as scripts.download_*.
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from common import load_fundamentals_tickers
 
 # Fetch horizon is decoupled from the backtest window: we pull every CSV ticker
 # from HISTORY_START (earliest membership start, unless BACKTEST_HISTORY_START
@@ -140,7 +147,14 @@ def _row_to_bar(row) -> dict:
     }
 
 
-def download_daily_bars(tickers: list, output_path: str, membership=None, end_default=None):
+def download_daily_bars(
+    tickers: list,
+    output_path: str,
+    membership=None,
+    end_default=None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
     """Download daily OHLCV bars for each ticker and save as JSON.
 
     Bars fetched with ``auto_adjust=True`` (adjusted) for a stable, continuous
@@ -159,11 +173,21 @@ def download_daily_bars(tickers: list, output_path: str, membership=None, end_de
         if i % 25 == 0:
             print(f"  Downloaded {i}/{total} tickers...", file=sys.stderr)
 
+        # Honor explicit start/end overrides (used by tests and CLI); otherwise
+        # fall back to the module-level fetch horizon. yfinance treats `end` as
+        # EXCLUSIVE, so add one day so the window actually covers `end`.
+        fetch_start = start or BACKTEST_START
+        if end:
+            fetch_end = (
+                datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+        else:
+            fetch_end = BACKTEST_END_EXCLUSIVE
         try:
             data = yf.download(
                 ticker,
-                start=BACKTEST_START,
-                end=BACKTEST_END_EXCLUSIVE,
+                start=fetch_start,
+                end=fetch_end,
                 progress=False,
                 threads=False,
                 auto_adjust=True,
@@ -224,6 +248,13 @@ def main():
     parser = argparse.ArgumentParser(description="Download S&P 500 daily equity bars for Lean backtesting")
     parser.add_argument("--tickers", type=str, nargs="+", help="Specific tickers to download")
     parser.add_argument("--refresh-sp500", action="store_true", help="Re-download S&P 500 list from GitHub")
+    parser.add_argument(
+        "--fundamentals-only",
+        action="store_true",
+        help="Restrict the download to tickers that have PIT fundamentals history "
+             "(plus the required ^TNX/^GSPC indices). Implied whenever --tickers "
+             "is not given.",
+    )
     script_dir = Path(__file__).resolve().parent.parent / "data"
     parser.add_argument("--bars-path", type=str, default=str(script_dir / "equity_bars.json"))
     parser.add_argument("--start-date", type=str, default=BACKTEST_START)
@@ -231,6 +262,20 @@ def main():
     args = parser.parse_args()
 
     tickers = args.tickers if args.tickers else get_sp500_tickers(refresh=args.refresh_sp500)
+
+    # Strict fundamentals filter: when not manually overriding tickers, only
+    # download bars for tickers that actually have PIT fundamentals (the
+    # tradeable universe), always including the required ^TNX/^GSPC indices via
+    # the helper. This keeps equity_bars.json aligned with what the backtest can
+    # screen and avoids wasting API calls on names we can never trade.
+    if args.tickers is None:
+        tickers = sorted(load_fundamentals_tickers())
+        if args.fundamentals_only:
+            print(
+                f"Strict fundamentals-only filter active: {len(tickers)} tickers",
+                file=sys.stderr,
+            )
+
     # Deduplicate while preserving order
     seen = set()
     tickers = [x for x in tickers if not (x in seen or seen.add(x))]

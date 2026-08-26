@@ -1,10 +1,13 @@
 import sys
 import os
+import logging
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
 from dotenv import load_dotenv
 import edgar
+
+logger = logging.getLogger(__name__)
 
 # Resolve .env in the same directory as this file
 _env_path = Path(__file__).resolve().parent / ".env"
@@ -102,3 +105,43 @@ DATA_END = BACKTEST_END
 # (fetch_missing_delisted.py). When unset, the script skips the Tiingo
 # fallback and degrades to the curated-rename + unavailable path.
 TIINGO_API_KEY = os.getenv("TIINGO_API_KEY")
+
+
+def get_tiingo_keys() -> list[str]:
+    """Return the configured Tiingo API keys for round-robin rotation.
+
+    Resolution order (first source wins per slot, deduplicated preserving
+    first-seen, case-sensitive):
+
+      1. ``TIINGO_API_KEYS`` — comma-separated list of keys
+      2. legacy ``TIINGO_API_KEY``
+      3. ``TIINGO_API_KEY_1``
+      4. ``TIINGO_API_KEY_2``
+
+    Returns ``[]`` when none are set. Key *values* are never logged — only the
+    count of loaded keys is reported.
+    """
+    import os as _os
+
+    candidates: list[str] = []
+    raw = _os.getenv("TIINGO_API_KEYS")
+    if raw:
+        candidates.extend(part for part in raw.split(","))
+    for env_name in ("TIINGO_API_KEY", "TIINGO_API_KEY_1", "TIINGO_API_KEY_2"):
+        v = _os.getenv(env_name)
+        if v:
+            candidates.append(v)
+
+    seen: set[str] = set()
+    keys: list[str] = []
+    for c in candidates:
+        c = c.strip()
+        if not c:
+            continue
+        if c in seen:
+            continue
+        seen.add(c)
+        keys.append(c)
+
+    logger.info("Loaded %d Tiingo API key(s)", len(keys))
+    return keys

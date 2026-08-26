@@ -55,7 +55,7 @@ Step 3  fetch_missing_delisted.py
          ▼
 Step 4  track_exclusions.py
          ├── runs bar-quality gate on every ticker in equity_bars.json
-         ├── cross-references membership + unavailable + throttled
+         ├── cross-references membership + unavailable
          ├── writes missing-data.txt  (human-readable report)
          ├── writes missing-data.json  (machine-readable)
          └── flags BROKEN tickers (malformed/unadjusted-split data)
@@ -277,7 +277,10 @@ ticker NOT in the backtest and why.
 2. Computes the set of S&P 500 membership-window overlays still missing from
    bars
 3. Cross-references with `equity_unavailable.json` to mark explained gaps
-4. Reads `equity_bars.throttled.txt` to flag rate-limited tickers
+
+Yahoo rate-limiting is surfaced by Step 2's `repair_equity_data.py` as its
+PENDING list on the console (re-run that script after a cooldown); it is not
+tracked in this report.
 
 **Output files** (in `lean_project/data/`):
 
@@ -293,7 +296,6 @@ ticker NOT in the backtest and why.
 | `broken` | Failed the quality gate — malformed/unadjusted data | **Action required** (manual review) |
 | `missing_window` | In S&P 500 window but absent AND not documented as unavailable | **Action required** (gap! re-run pipeline) |
 | `documented_unavailable` | Absent but explained in `equity_unavailable.json` | Expected |
-| `throttled` | Yahoo rate-limited; re-run the download | Wait + retry |
 
 > **If `missing_window` is non-empty after all three download/repair steps,
 > you have an unexplained data gap — do NOT proceed to embedding.** Investigate
@@ -440,7 +442,6 @@ Derived values (computed in `config/config.py`):
 | `fundamentals_history.py` | `embed_data.py` | Embedded quarterlies |
 | `damodaran_erp_history.json` | `implied_erp/` pipeline | PIT ERP history |
 | `equity_unavailable.json` | `fetch_missing_delisted.py` | Tracked survivorship gaps |
-| `equity_bars.throttled.txt` | `repair_equity_data.py` | Throttled ticker list |
 | `missing-data.txt` | `track_exclusions.py` | Human exclusion report |
 | `missing-data.json` | `track_exclusions.py` | Machine exclusion report |
 | `*.bak.json` | download/repair/fetch scripts | Backup before overwrite |

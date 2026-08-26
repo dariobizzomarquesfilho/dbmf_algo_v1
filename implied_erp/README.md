@@ -46,10 +46,6 @@ cd lean_project && python scripts/embed_data.py
 - Per-period extracted JSONs -> `implied_erp/data/erp/erp_*.json`
 - Lean PIT history -> `lean_project/data/damodaran_erp_history.json`
 
-### Helper (`helper.py`)
-
-Utility for fetching index-level data via yfinance. Used by other modules in the pipeline.
-
 ## Dependencies
 
 - **openpyxl** — Excel file processing (`.xlsx`)

@@ -80,11 +80,23 @@ def build(erp_dir: Path) -> dict:
         us_erp = _us_erp_for(data)
         mature_erp = data.get("mature_market_erp")
 
+        if us_erp is None and mature_erp is None:
+            print(
+                f"[warn] skipping {f.name}: both us_erp and mature_market_erp are None",
+                file=sys.stderr,
+            )
+            continue
+
         history[date_key] = {
             "us_erp": us_erp,
             "mature_market_erp": mature_erp,
         }
 
+    if not history:
+        print(
+            f"[warn] no valid ERP periods found in {erp_dir} — history will be empty",
+            file=sys.stderr,
+        )
     return {"erp_history": dict(sorted(history.items()))}
 
 

@@ -13,7 +13,12 @@ the map is missing, so the pipeline never needs a manual first step.
 Usage:
     python scripts/build_cik_map.py
     python scripts/build_cik_map.py --output lean_project/data/sp500_cik_map.csv
-    python scripts/build_cik_map.py --refresh   # ignore existing, rebuild current-only
+    python scripts/build_cik_map.py --refresh   # merge=False: rebuild the
+                                                 # current-only map (drops curated
+                                                 # delisted CIKs); run this BEFORE
+                                                 # a fundamentals rebuild so the
+                                                 # downloader re-probes delisted
+                                                 # names against the fresh map
 """
 
 from __future__ import annotations
@@ -150,7 +155,10 @@ def main():
     parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Ignore any existing map and rebuild from current constituents only",
+        help="Rebuild from current constituents only (merge=False): drops any "
+             "curated delisted CIKs and regenerates the current-only map. Run "
+             "this BEFORE a fundamentals rebuild so the downloader re-probes "
+             "delisted names against the fresh map.",
     )
     args = parser.parse_args()
     build_cik_map(Path(args.output), merge=not args.refresh)

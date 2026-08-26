@@ -35,7 +35,7 @@ import time
 import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Iterator
 
 # Add repo root so `import config` works (config/ is at repo root).
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -48,6 +48,13 @@ _LEAN_PROJECT = Path(__file__).resolve().parent.parent
 if str(_LEAN_PROJECT) not in sys.path:
     sys.path.insert(0, str(_LEAN_PROJECT))
 from data.sp500_data import load_sp500_membership, clip_to_membership
+
+# Add this scripts dir to path so `from common import ...` works both when run
+# directly (scripts/ on sys.path[0]) and when imported as scripts.fetch_*.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from common import load_fundamentals_tickers
 from data.delisted_aliases import (
     RENAME_MAP,
     EXCLUDED_COMPLEX,
@@ -83,6 +90,20 @@ class TiingoRateLimited(Exception):
     """
 
 
+def _iter_tiingo_keys(keys: list) -> Iterator[str]:
+    """Infinite round-robin iterator over the configured Tiingo keys.
+
+    Yields keys in order, cycling forever, so callers can rotate through the
+    pool on rate limits. Returns immediately (yields nothing) for an empty list.
+    """
+    if not keys:
+        return
+    i = 0
+    while True:
+        yield keys[i % len(keys)]
+        i += 1
+
+
 # ---------------------------------------------------------------------------
 # TLS context (parity with how urllib is already used elsewhere)
 # ---------------------------------------------------------------------------
@@ -111,11 +132,19 @@ def compute_missing(
     membership: dict,
     win_start: str,
     win_end: str,
+    fundamentals: Optional[set] = None,
 ) -> list[str]:
-    """Window S&P members (overlap [win_start, win_end]) with no bars."""
+    """Window S&P members (overlap [win_start, win_end]) with no bars.
+
+    When ``fundamentals`` is provided, only tickers present in that set are
+    considered missing (the tradeable universe). ``^TNX``/``^GSPC`` are always
+    excluded (they are handled separately).
+    """
     missing = []
     for t, ivs in membership.items():
         if t in ("^TNX", "^GSPC"):
+            continue
+        if fundamentals is not None and t not in fundamentals:
             continue
         if not any(s <= win_end and (e is None or e >= win_start) for s, e in ivs):
             continue
@@ -246,35 +275,45 @@ def _tiingo_to_bars(rows: list) -> Optional[dict]:
 
 
 def _tiingo_fetch(
-    ticker: str, start: str, end: str, token: str, ctx: ssl.SSLContext
+    ticker: str, start: str, end: str, keys: list, ctx: ssl.SSLContext, key_iter
 ) -> tuple[Optional[dict], Optional[str]]:
-    """Fetch Tiingo daily prices with mandatory US-listing guard.
+    """Fetch Tiingo daily prices with mandatory US-listing guard, rotating keys.
 
-    Returns (bars_or_None, reason_or_None). Prices are fetched first; metadata is
-    fetched only for the guard. A 404 on metadata is treated as "no US-listing
-    confirmation" — still accepted if the price rows are valid US history.
+    Tries each configured key in round-robin order on 429/403/503. If every key
+    is rate-limited, raises ``TiingoRateLimited`` (the caller defers the ticker
+    rather than marking it unavailable). A genuine 404 / empty result for a key
+    is returned immediately (no point retrying other keys for the same ticker).
     """
-    try:
-        rows = _tiingo_request(
-            f"/tiingo/daily/{ticker}/prices?startDate={start}&endDate={end}", token, ctx
-        )
-    except TiingoRateLimited:
-        return None, "tiingo_ratelimited"
-    if not rows:
-        return None, "tiingo_no_prices"
-    bars = _tiingo_to_bars(rows)
-    if not bars:
-        return None, "tiingo_no_adjclose"
+    if not keys:
+        return None, "no_keys"
+    last_rate = False
+    for _ in range(len(keys)):
+        token = next(key_iter)
+        try:
+            rows = _tiingo_request(
+                f"/tiingo/daily/{ticker}/prices?startDate={start}&endDate={end}", token, ctx
+            )
+        except TiingoRateLimited:
+            last_rate = True
+            continue
+        if not rows:
+            return None, "tiingo_no_prices"
+        bars = _tiingo_to_bars(rows)
+        if not bars:
+            return None, "tiingo_no_adjclose"
 
-    try:
-        meta = _tiingo_request(f"/tiingo/daily/{ticker}", token, ctx)
-    except TiingoRateLimited:
-        return None, "tiingo_ratelimited"
-    if meta is not None:
-        ex = meta.get("exchangeCode")
-        if ex is not None and ex not in US_EXCHANGES:
-            return None, f"tiingo_foreign_collision:{ex}"
-    return bars, None
+        try:
+            meta = _tiingo_request(f"/tiingo/daily/{ticker}", token, ctx)
+        except TiingoRateLimited:
+            last_rate = True
+            continue
+        if meta is not None:
+            ex = meta.get("exchangeCode")
+            if ex is not None and ex not in US_EXCHANGES:
+                return None, f"tiingo_foreign_collision:{ex}"
+        return bars, None
+    # Every key was rate-limited / quota-exhausted.
+    raise TiingoRateLimited(f"All {len(keys)} Tiingo key(s) rate-limited for {ticker}")
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +324,7 @@ def recover_gaps(
     membership: dict,
     win_start: str,
     win_end: str,
-    token: Optional[str],
+    keys: list,
     ctx: ssl.SSLContext,
     pacing: float = 0.7,
 ) -> tuple[dict, list, list]:
@@ -293,14 +332,22 @@ def recover_gaps(
 
     ``new_bars`` are NOT yet merged into ``bars``. ``plan_rows`` is a printable
     per-ticker plan: {ticker, source, verdict, reason}.
+
+    ``keys`` is the list of Tiingo API keys (round-robin rotated on rate limits);
+    an empty list disables the Tiingo fallback (degrades to curated-rename +
+    unavailable, matching the legacy no-key path).
     """
-    missing = compute_missing(bars, membership, win_start, win_end)
+    missing = compute_missing(
+        bars, membership, win_start, win_end, fundamentals=load_fundamentals_tickers()
+    )
     new_bars: dict = {}
     unavailable: list = []
     plan: list = []
 
     total = len(missing)
     print(f"Missing window members: {total}")
+
+    key_iter = _iter_tiingo_keys(keys)
 
     for i, t in enumerate(sorted(missing), 1):
         if i % 25 == 0:
@@ -321,18 +368,20 @@ def recover_gaps(
             plan.append({"ticker": t, "source": "rename", "verdict": "fallthrough",
                          "reason": reason})
 
-        # (b) Tiingo fallback
-        if token:
-            tb, reason = _tiingo_fetch(t, start, end, token, ctx)
+        # (b) Tiingo fallback (rotates keys on 429/403/503)
+        if keys:
+            try:
+                tb, reason = _tiingo_fetch(t, start, end, keys, ctx, key_iter)
+            except TiingoRateLimited:
+                # Quota/rate-limited on every key: DEFER (recoverable later) —
+                # never mark unavailable.
+                plan.append({"ticker": t, "source": "tiingo", "verdict": "deferred",
+                             "reason": "rate_limited_quota"})
+                continue
             if tb is not None:
                 new_bars[t] = tb
                 plan.append({"ticker": t, "source": "tiingo", "verdict": "ok",
                              "reason": f"{start}..{end}"})
-                continue
-            # Quota/rate-limited: DEFER (recoverable later) — never mark unavailable.
-            if reason == "tiingo_ratelimited":
-                plan.append({"ticker": t, "source": "tiingo", "verdict": "deferred",
-                             "reason": "rate_limited_quota"})
                 continue
             plan.append({"ticker": t, "source": "tiingo", "verdict": "rejected",
                          "reason": reason})
@@ -341,10 +390,10 @@ def recover_gaps(
                          "reason": "no TIINGO_API_KEY"})
 
         # (c) Unavailable (genuinely unrecoverable only: foreign collision, 404, no data)
-        rec_source = "tiingo" if token else "none"
+        rec_source = "tiingo" if keys else "none"
         if t in EXCLUDED_COMPLEX:
             reason = "excluded_complex"
-        elif token:
+        elif keys:
             reason = reason or "unrecoverable"  # carried from the rejected Tiingo call
         else:
             reason = "unrecoverable"
@@ -388,10 +437,12 @@ def main() -> None:
 
     win_start, win_end = config.BACKTEST_START, config.BACKTEST_END
 
-    token = config.TIINGO_API_KEY
+    # Round-robin pool of Tiingo keys (empty list => Tiingo fallback disabled,
+    # degrading to curated-rename + unavailable, same as the legacy no-key path).
+    keys = config.get_tiingo_keys()
 
     new_bars, unavailable, plan = recover_gaps(
-        bars, membership, win_start, win_end, token, ctx, pacing=args.pacing
+        bars, membership, win_start, win_end, keys, ctx, pacing=args.pacing
     )
 
     _print_plan(plan)

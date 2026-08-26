@@ -20,7 +20,6 @@ dbmf_quant_v2/
 │       └── specs/               # Design specs
 ├── implied_erp/                # Damodaran ERP extraction pipeline
 │   ├── extract_damodaran_erp.py  # Full extraction (.xlsx → structured JSON)
-│   ├── helper.py                 # yfinance index-level fetcher
 │   ├── README.md
 │   ├── data/
 │   │   ├── erp/                  # Per-period extracted JSONs (2013-2026)
@@ -30,6 +29,7 @@ dbmf_quant_v2/
 │   └── scripts/
 │       ├── download_damodaran_erp.py  # Download archive .xls/.xlsx via HTTP
 │       ├── extract_all_damodaran_erp.py  # Batch extract all periods
+│       ├── scrape_histimpl.py            # Historical US implied ERP (histimpl)
 │       └── build_lean_erp_history.py     # Build Lean-compatible PIT ERP history
 └── lean_project/               # QuantConnect Lean backtest (primary deliverable)
     ├── main.py                 # PbRoeAtrAlgorithm — event-driven rebalancing
@@ -46,7 +46,7 @@ dbmf_quant_v2/
     │   ├── bootstrap_data.py     # Writes CSV.zip files into Lean's data folder
     │   ├── sp500_data.py         # S&P 500 PIT membership utilities
     │   ├── corporate_actions.py  # Curated S&P 500 spinoffs
-    │   ├── exclusions.py         # Aggregate excluded tickers (broken, missing, throttled)
+    │   ├── exclusions.py         # Aggregate excluded tickers (broken, missing, documented)
     │   ├── delisted_aliases.py   # Delisted ticker alias mappings
     │   ├── bar_quality.py        # Bar-quality gate (impossible OHLC, zero prices)
     │   ├── sp500_ticker_start_end.csv  # S&P 500 membership with start/end dates
@@ -67,6 +67,8 @@ dbmf_quant_v2/
     │   ├── convert_to_qc_format.py     # Convert data to QC zip format
     │   ├── repair_equity_data.py       # Repair/fix equity bar data
     │   ├── fetch_missing_delisted.py   # Fetch missing/delisted ticker data
+    │   ├── build_cik_map.py            # Ticker → CIK map (edgar self-bootstrap)
+    │   ├── common.py                   # Shared download/repair helpers
     │   └── track_exclusions.py         # Track excluded tickers and reasons
     ├── tests/                    # pytest test suite
     │   ├── conftest.py
@@ -74,6 +76,7 @@ dbmf_quant_v2/
     │   ├── test_equity_completeness.py
     │   ├── test_erp_pit.py
     │   ├── test_eps_growth.py
+    │   ├── test_bugfix_audit.py
     │   └── test_pit_data.py
     └── Lean/                     # QuantConnect Lean framework
 ```
@@ -90,15 +93,16 @@ The `lean_project/` directory contains the QuantConnect Lean migration of the P/
 3. Select stocks where implied P/B > actual P/B (undervalued)
 4. Equal-weight positions (1/max_positions)
 5. Exit positions when ATR trailing stop is breached
-6. Filter out financials by sector keyword matching
+6. Filter out financials using edgar's native SIC/business classification
 
 **Key design decisions:**
 - All data is embedded in Python modules (no external .csv.zip or .json files at runtime)
 - Prices injected via `Security.SetMarketPrice()` to avoid Security.Price=0 bug
-- Daily rebalance scheduled at `AfterMarketClose("AAPL", 1)` (16:01) when all daily bars arrive
+- Daily rebalance triggered from `OnData` (one cycle per new trading day, after the daily bar arrives); `CoarseSelection`/`FineSelection` Lean hooks are not used
+- S&P 500 membership is point-in-time: members active at the start date are pre-subscribed, later additions are `AddEquity()`-ed on their index-add date via `data.sp500_data.intervals_active` (long-dead historical members are never subscribed)
 - ATR computation uses embedded bars dict (bypasses `algorithm.History()`)
-- Risk-free rate from ^TNX embedded bars (not from interest-rate.csv)
-- Financial sector excluded via keyword matching on yfinance sector/industry fields
+- Risk-free rate from ^TNX embedded bars, point-in-time as-of the rebalance date (not from interest-rate.csv)
+- Financial sector excluded via edgar native classification (SIC/business category)
 - Fundamentals use TTM from SEC 10-Q filings (edgartools)
 - PIT quarterly fundamentals used when available; tickers without quarterly coverage at a date are skipped (no static snapshot fallback — that would be look-ahead bias)
 - Backtest window is single source of truth: `config/.env` → `config/config.py` → `data/backtest_config.py` → `lean.json`
@@ -153,7 +157,7 @@ lean backtest
 lean backtest --config lean.json
 ```
 
-The backtest runs from **2020-01-01 to 2026-08-01** (configured in `config/.env` via `BACKTEST_START`/`BACKTEST_END`, propagated through `config/config.py` → `data/backtest_config.py` → `lean.json`) with $100,000 initial capital. Equity bar data must additionally cover a warm-up window before `BACKTEST_START` (>= `BACKTEST_WARMUP_DAYS` trading days, default 252) so rolling indicators like beta/ATR have enough prior bars. `scripts/download_equity_data.py` pulls from `config.DATA_START` (warm-up) through `config.BACKTEST_END`; `scripts/embed_data.py` hard-fails if coverage is missing.
+The backtest window is configured in `config/.env` via `BACKTEST_START`/`BACKTEST_END` (propagated through `config/config.py` → `data/backtest_config.py` → `lean.json` by `scripts/embed_data.py`; re-run embed after any `.env` change) with $100,000 initial capital. Equity bar data must additionally cover a warm-up window before `BACKTEST_START` (>= `BACKTEST_WARMUP_DAYS` trading days, default 252) so rolling indicators like beta/ATR have enough prior bars. `scripts/download_equity_data.py` pulls from `config.HISTORY_START` through `config.BACKTEST_END`; `scripts/embed_data.py` hard-fails if coverage is missing.
 
 ### Regenerating Embedded Data
 
@@ -185,14 +189,14 @@ After step 4, commit the regenerated `data/*_json.py`, `data/*_bars.py`, `data/f
 - Python 3.11+
 - Windows 11 (PowerShell)
 - Docker (for Lean backtesting)
-- QuantConnect Lean CLI v1.0.227+
+- QuantConnect Lean CLI v1.0.228 (pinned in `config/requirements.txt`; `pip install -r config/requirements.txt` restores it)
 
 ## Known Issues
 
 1. **Interest rate CSV**: `data/alternative/interest-rate/usa/interest-rate.csv` had dates in `YYYYMMDD` format which Lean couldn't parse. Fixed by converting to `YYYY-MM-DD`. The strategy uses ^TNX from embedded bars for the risk-free rate, so this file is cosmetic only.
 2. **82% max drawdown**: Strategy design concern, not a bug.
-3. **No test suite**: No automated tests exist yet.
-4. **No linter or formatter**: No `flake8`, `black`, `ruff`, or `pylint` configuration.
-5. **yfinance negative bookValue**: yfinance returns negative `bookValue` and `priceToBook` for ~33 S&P 500 tickers (SBUX, MCD, ABBV, LOW, etc.). These tickers are skipped per-screen when book_value is invalid — they are not dropped from the cache and may have valid book_value in a future quarter after refresh. P/B is always computed dynamically as `current_price / book_value` for the correct time period.
-6. **PIT data coverage gap**: `fundamentals_history.json` currently covers only 2 tickers. yfinance only returns the most recent ~7 quarters per ticker. When quarterly data is unavailable for a ticker at a given backtest date, the screen skips that ticker (no static fallback — using current data for historical dates would be look-ahead bias). Run `python scripts/download_edgartools_data.py` periodically to accumulate new quarters via SEC filings.
-7. **`risk_free_rate()` only supports USD**: Non-US tickers will raise `ValueError`. The CAPM cost of equity `r` cannot be built for non-USD currencies.
+3. **No linter or formatter configured**: No `flake8`, `black`, `ruff`, or `pylint` configuration (a pytest suite exists under `lean_project/tests` and `implied_erp/tests`).
+4. **yfinance negative bookValue**: yfinance returns negative `bookValue` and `priceToBook` for ~33 S&P 500 tickers (SBUX, MCD, ABBV, LOW, etc.). These tickers are skipped per-screen when book_value is invalid — they are not dropped from the cache and may have valid book_value in a future quarter after refresh. P/B is always computed dynamically as `current_price / book_value` for the correct time period.
+5. **PIT data coverage depth varies by ticker**: `fundamentals_history.json` covers ~687 tickers via edgartools SEC XBRL, but XBRL facts only reach back to ~2009 and many later-added S&P 500 names only gained fundamentals ~2019, so early-window universes are thinner. When quarterly data is unavailable for a ticker at a given backtest date, the screen skips it (no static fallback — using current data for historical dates would be look-ahead bias). Run `python scripts/download_edgartools_data.py` periodically to accumulate new quarters via SEC filings.
+6. **USD-only risk-free rate**: the CAPM cost of equity uses ^TNX (USD); non-USD listings are out of scope.
+7. **Known bar-coverage gaps**: EA / FOX / FOXA / IR have incomplete or late-starting bars in the current `equity_bars.json`; `embed_data.py` reports them at embed time until a re-download repairs them.

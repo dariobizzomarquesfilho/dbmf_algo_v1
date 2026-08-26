@@ -15,11 +15,11 @@ There is no build system, test suite, or linter configured at the repo root. `le
 ## Environment
 
 - **Python 3.11+** virtualenv at `.venv` (Windows / PowerShell). Activate with `.\.venv\Scripts\Activate.ps1`.
-- Dependencies in `config/requirements.txt`: `matplotlib`, `yfinance`, `pandas`, `openpyxl`, `xlrd>=2.0.1`, `numpy`, `edgar`, `python-dotenv`, `fredapi`, `requests`.
-- Install: `pip install -r config/requirements.txt`
+- Dependencies in `config/requirements.txt`: `yfinance`, `pandas`, `openpyxl`, `xlrd>=2.0.1`, `numpy`, `edgartools==5.52.0` (provides the `edgar` import), `lean==1.0.228`, `python-dotenv`, `requests`.
+- Install: `pip install -r config/requirements.txt` (restores `lean` CLI + `edgar`; no separate `pip install lean` needed)
 - **Docker** required for Lean backtesting (quantconnect/lean:foundation image).
-- **QuantConnect Lean CLI** v1.0.227+ required.
 - `.env` file required at `config/.env` with `SEC_USER` identity for edgartools and optional `BACKTEST_START`/`BACKTEST_END` overrides.
+- Tests: `python -m pytest lean_project/tests implied_erp/tests` from the repo root.
 
 ## Module Layout
 
@@ -33,16 +33,16 @@ dbmf_quant_v2/
 │   └── requirements.txt
 ├── implied_erp/                  # Damodaran ERP extraction pipeline
 │   ├── extract_damodaran_erp.py    # Full extraction (.xlsx → structured JSON)
-│   ├── helper.py                   # yfinance index-level fetcher
 │   ├── README.md
 │   ├── scripts/                    # PIT pipeline scripts
 │   │   ├── download_damodaran_erp.py
 │   │   ├── extract_all_damodaran_erp.py
+│   │   ├── scrape_histimpl.py      # Historical US implied ERP (annual fallback)
 │   │   └── build_lean_erp_history.py
 │   ├── data/
 │   │   ├── erp/                    # Per-period extracted JSONs (2013-2026)
 │   │   └── raw/                    # Downloaded .xls/.xlsx (gitignored)
-│   └── README.md
+│   └── tests/                      # pytest tests for extractor + histimpl parser
 ├── lean_project/                 # Lean backtest (primary deliverable)
 │   ├── main.py                    # PbRoeAtrAlgorithm
 │   ├── lean.json                  # Lean v2 config
@@ -78,6 +78,8 @@ dbmf_quant_v2/
 │   │   ├── convert_to_qc_format.py
 │   │   ├── repair_equity_data.py
 │   │   ├── fetch_missing_delisted.py
+│   │   ├── build_cik_map.py
+│   │   ├── common.py              # Shared variants/row-conversion/end helpers
 │   │   └── track_exclusions.py
 │   ├── tests/                     # pytest test suite
 │   └── Lean/                      # QuantConnect Lean framework
@@ -125,7 +127,7 @@ python scripts/embed_data.py
 ```
 Embedded Python modules (zlib+base64)
     │
-    ├── equity_bars.py           → ~790 tickers × ~1,897 daily bars
+    ├── equity_bars.py           → ~790 tickers × daily bars
     ├── fundamentals_history.py  → quarterly PIT book_value / roe / eps / g_eps
     └── damodaran_erp_history.py → US ERP PIT series (2001-2026)
     │
@@ -134,23 +136,26 @@ CSV.zip files in Lean data folder
     │
     ▼
 PbRoeAtrAlgorithm (main.py)
-    ├── Initialize() → load embedded data, bootstrap, AddEquity, schedule rebalance
-    ├── CoarseSelection() → DollarVolume > $10M filter
-    ├── FineSelection() → P/B vs ROE Gordon-growth screen
-    └── DailyRebalance() → ensure prices, check stops, rescreen, rebalance
+    ├── Initialize() → load embedded data, bootstrap, pre-subscribe members
+    │   active at the start date, arm the OnData daily trigger
+    ├── OnData() → _ensure_subscribed() adds members on their index-add date
+    │   (guarded by data.sp500_data.intervals_active), then DailyRebalance()
+    └── DailyRebalance() → ensure prices, check stops, run_fine_selection()
+        (P/B vs ROE Gordon-growth screen in universe/pb_roe_universe.py),
+        corporate-action / membership exits, SetHoldings / Liquidate
 ```
 
 **Key design decisions:**
 - All data is embedded in Python modules (no external .csv.zip or .json files at runtime)
-- Prices injected via `Security.SetMarketPrice()` to avoid Security.Price=0 bug
-- Daily rebalance scheduled at `AfterMarketClose("AAPL", 1)` (16:01) when all daily bars arrive
+- Prices injected via `Security.Price` fix: `Security.SetMarketPrice()` from embedded bars
+- Daily rebalance triggered from `OnData` (one cycle per trading day); Lean's Coarse/Fine universe hooks are not wired up
 - ATR computation uses embedded bars dict (bypasses `algorithm.History()`)
-- Risk-free rate from ^TNX embedded bars (not from interest-rate.csv)
-- Financial sector excluded via keyword matching on yfinance sector/industry fields
+- Risk-free rate is point-in-time from ^TNX embedded bars (`universe/pit_data.resolve_risk_free_rate`), never future bars
+- Financial sector excluded via edgar native classification (SIC / business category)
 - Fundamentals use TTM from SEC 10-Q filings (edgartools)
 - PIT quarterly fundamentals used when available; tickers without quarterly coverage at a date are skipped (no static snapshot fallback — that would be look-ahead bias)
-- Backtest window is single source of truth: `config/.env` → `config/config.py` → `data/backtest_config.py` → `lean.json`
-- S&P 500 membership is point-in-time via `sp500_ticker_start_end.csv`
+- Backtest window is single source of truth: `config/.env` → `config/config.py` → `data/backtest_config.py` → `lean.json` (re-run `scripts/embed_data.py` after changing `.env`)
+- S&P 500 membership is point-in-time via `sp500_ticker_start_end.csv`; bars are clipped to membership intervals
 
 ### Implied ERP Pipeline
 
@@ -183,11 +188,11 @@ At runtime, `pb_roe_universe.py` resolves the ERP **solely** through the point-i
 
 1. **Interest rate CSV**: `lean_project/data/alternative/interest-rate/usa/interest-rate.csv` had dates in `YYYYMMDD` format which Lean couldn't parse. Fixed by converting to `YYYY-MM-DD`. The strategy uses ^TNX from embedded bars for the risk-free rate, so this file is cosmetic only.
 2. **82% max drawdown**: Strategy design concern, not a bug.
-3. **No test suite**: No automated tests exist yet.
-4. **No linter or formatter**: No `flake8`, `black`, `ruff`, or `pylint` configuration.
-5. **`risk_free_rate()` only supports USD**: Non-US tickers will raise `ValueError`. The CAPM cost of equity `r` cannot be built for non-USD currencies.
-6. **yfinance negative bookValue**: yfinance returns negative `bookValue` and `priceToBook` for ~33 S&P 500 tickers (SBUX, MCD, ABBV, LOW, etc.). These tickers are skipped per-screen when book_value is invalid — they are not dropped from the cache and may have valid book_value in a future quarter after refresh. P/B is always computed dynamically as `current_price / book_value` for the correct time period.
-7. **PIT data coverage gap**: `fundamentals_history.json` currently covers only 2 tickers. yfinance only returns the most recent ~7 quarters per ticker. When quarterly data is unavailable for a ticker at a given backtest date, the screen skips that ticker (no static fallback — using current data for historical dates would be look-ahead bias). Run `python scripts/download_edgartools_data.py` periodically to accumulate new quarters via SEC filings.
+3. **No linter or formatter**: No `flake8`, `black`, `ruff`, or `pylint` configuration. A pytest suite exists (`lean_project/tests`, `implied_erp/tests`).
+4. **USD-only risk-free rate**: CAPM cost of equity uses ^TNX (USD); non-USD listings are out of scope.
+5. **yfinance negative bookValue**: yfinance returns negative `bookValue` and `priceToBook` for ~33 S&P 500 tickers (SBUX, MCD, ABBV, LOW, etc.). These tickers are skipped per-screen when book_value is invalid — they are not dropped from the cache and may have valid book_value in a future quarter after refresh. P/B is always computed dynamically as `current_price / book_value` for the correct time period.
+6. **PIT coverage depth varies**: edgartools XBRL fundamentals reach back to ~2009; many later-added S&P 500 names only have fundamentals from ~2019 onward, so early-window universes are thinner (SEC source limit). Tickers without quarterly coverage at a date are skipped — no static-snapshot fallback (look-ahead bias).
+7. **Known bar-coverage gaps**: EA / FOX / FOXA / IR have incomplete bars in the current `equity_bars.json`; `embed_data.py` reports them at embed time until repaired by re-running the download/repair pipeline.
 
 ## Data Files
 
@@ -195,18 +200,18 @@ At runtime, `pb_roe_universe.py` resolves the ERP **solely** through the point-i
 |------|----------|-------------|
 | `erp_*.json` | `implied_erp/data/erp/` | Per-period full ERP extractions (2013-2026) |
 | `damodaran_erp_history.json` | `lean_project/data/` | US ERP PIT series (embedded as `damodaran_erp_history.py`) |
+| `histimpl_us_erp.json` | `implied_erp/data/` | Annual US implied ERP fallback (optional; embedded as `damodaran_erp_history_us.py` when present) |
 | `equity_bars.json` | `lean_project/data/` | Source equity daily bars (~790 tickers) |
 | `fundamentals_history.json` | `lean_project/data/` | Quarterly PIT history (TTM per quarter, edgartools) |
 | `sp500_ticker_start_end.csv` | `lean_project/data/` | S&P 500 membership with start/end dates |
 | `ctryprem*.xls/.xlsx` | `implied_erp/data/raw/` (gitignored) | Downloaded Damodaran source files |
-| `ctryprem*.xlsx` | `implied_erp/data/raw/` (gitignored, auto-downloaded) | Source Damodaran spreadsheet — auto-downloaded from `https://pages.stern.nyu.edu/~adamodar/pc/datasets/ctryprem.xlsx` by `download_damodaran_erp.py` |
 
 ## Dependencies (added)
 
-- **edgar** — SEC EDGAR data access (TTM financials from 10-Q filings)
+- **edgartools==5.52.0** — SEC EDGAR data access (provides the `edgar` module used across the project)
+- **lean==1.0.228** — QuantConnect Lean CLI (provides `lean backtest`; now pinned in `requirements.txt` so the venv self-heals)
 - **python-dotenv** — Load SEC_USER identity from `.env`
 - **xlrd** — Read legacy `.xls` Damodaran archive files
-- **fredapi** — FRED API access
 - **requests** — HTTP downloads
 
 ## Dependencies
@@ -215,5 +220,4 @@ At runtime, `pb_roe_universe.py` resolves the ERP **solely** through the point-i
 - **yfinance** — Yahoo Finance API (all modules)
 - **pandas** — Data manipulation (`lean_project/`)
 - **numpy** — Numerical operations (`lean_project/`)
-- **matplotlib** — Plotting (`config/requirements.txt`)
 - **difflib**, **unicodedata**, **json**, **argparse**, **zlib**, **base64** — Standard library

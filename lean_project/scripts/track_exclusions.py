@@ -1,8 +1,8 @@
 """Generate the equity-bar exclusion report (missing-data.txt / .json).
 
-Scans the current equity_bars.json + membership + unavailable/throttled
-artifacts and writes a consolidated record of every ticker that will NOT be
-part of the backtest, for later documentation / disclaimer.
+Scans the current equity_bars.json + membership + unavailable artifacts and
+writes a consolidated record of every ticker that will NOT be part of the
+backtest, for later documentation / disclaimer.
 
 Usage (from lean_project):
     python scripts/track_exclusions.py
@@ -41,11 +41,7 @@ def main() -> int:
     import json
 
     import config  # noqa: F401  (triggers .env / set_identity)
-    from data.exclusions import (
-        collect_exclusions,
-        load_throttled,
-        write_reports,
-    )
+    from data.exclusions import collect_exclusions, write_reports
     from data.sp500_data import load_sp500_membership
 
     bars_path = Path(args.bars_path)
@@ -59,8 +55,6 @@ def main() -> int:
     )
 
     unavailable_path = _LEAN_PROJECT / "data" / "equity_unavailable.json"
-    throttled_path = _LEAN_PROJECT / "data" / "equity_bars.throttled.txt"
-    throttled = load_throttled(str(throttled_path))
 
     info = collect_exclusions(
         bars,
@@ -68,7 +62,6 @@ def main() -> int:
         config.BACKTEST_START,
         config.BACKTEST_END,
         unavailable_path=str(unavailable_path),
-        throttled=throttled,
     )
 
     out = write_reports(
@@ -81,7 +74,7 @@ def main() -> int:
     print(f"Wrote exclusion report: {out}")
     print(
         f"  broken={len(info['broken'])} missing_window={len(info['missing_window'])} "
-        f"documented={len(info['documented_unavailable'])} throttled={len(info['throttled'])}"
+        f"documented={len(info['documented_unavailable'])}"
     )
     return 0
 

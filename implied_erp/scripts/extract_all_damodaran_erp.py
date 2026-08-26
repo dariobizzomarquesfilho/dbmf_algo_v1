@@ -53,13 +53,13 @@ def _date_key_from_filename(basename: str) -> str | None:
     # ctryprem00.xls = 2001, ctryprem24.xls = 2025.  The embedded 'Date of
     # update' cell is only the in-year publication date and is NOT used for
     # anchoring (see _resolve_date).
-    m = re.match(r"ctryprem(\d{2})\.xls", basename, re.IGNORECASE)
+    m = re.match(r"ctryprem(\d{2})\.xls$", basename, re.IGNORECASE)
     if m:
         year = 2001 + int(m.group(1))
         return f"{year}-01-01"
 
     # ctrypremMMMYY.xlsx → YYYY-MM-01  (e.g. Apr26 → 2026-04-01, July26 → 2026-07-01)
-    m = re.match(r"ctryprem([A-Za-z]{3,4})(\d{2})\.xlsx", basename, re.IGNORECASE)
+    m = re.match(r"ctryprem([A-Za-z]{3,4})(\d{2})\.xlsx$", basename, re.IGNORECASE)
     if m:
         month_str = m.group(1).lower()[:3]
         month = _MONTH_MAP.get(month_str)
@@ -101,11 +101,11 @@ def _resolve_date(raw_path: Path, erp_data: dict) -> str:
     if fb:
         return fb
 
-    # Last resort: file mtime as YYYY-MM-DD
+    # Last resort: file mtime as YYYY-MM-DD (local date, not UTC)
     mtime = raw_path.stat().st_mtime
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
 
 
 def _get_us_erp(data: dict) -> float | None:
@@ -176,45 +176,29 @@ def main() -> None:
     failed = 0
 
     for raw_path in raw_files:
-        # Output filename: erp_<YYYY-MM-DD>.json
-        # We don't know the date yet — extract first, then resolve.
-        # For efficiency, check if output exists first (using filename heuristic).
+        # Output path is erp_<YYYY-MM-DD>.json. Files without a year in their
+        # name (e.g. ctryprem.xlsx) must be extracted first to resolve the date.
+        data = None
         date_key = _date_key_from_filename(raw_path.name)
-        if date_key is None:
-            # For files like ctryprem.xlsx, we need to extract first to get the date.
-            # Extract to a temp name, then rename.
-            pass
-
-        # Determine output path
         if date_key:
-            out_name = f"erp_{date_key}.json"
+            out_path = erp_dir / f"erp_{date_key}.json"
         else:
-            # Extract first to get the updated date, then name properly
             try:
                 data = extract(str(raw_path))
-                resolved = _resolve_date(raw_path, data)
-                out_name = f"erp_{resolved}.json"
             except Exception as e:
                 print(f"[error] extracting {raw_path.name}: {e}", file=sys.stderr)
                 failed += 1
                 continue
-
-        out_path = erp_dir / out_name
+            out_path = erp_dir / f"erp_{_resolve_date(raw_path, data)}.json"
 
         if out_path.exists() and not args.force:
-            print(f"[skip] {out_name} (already exists)", file=sys.stderr)
+            print(f"[skip] {out_path.name} (already exists)", file=sys.stderr)
             skipped += 1
             continue
 
         try:
-            data = extract(str(raw_path))
-
-            # If we already extracted above (no date_key), we have the data.
-            # If we haven't, extract now.
-            if date_key is None:
-                resolved = _resolve_date(raw_path, data)
-                out_name = f"erp_{resolved}.json"
-                out_path = erp_dir / out_name
+            if data is None:
+                data = extract(str(raw_path))
 
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(
@@ -224,7 +208,7 @@ def main() -> None:
 
             n_countries = len(data.get("countries", {}))
             print(
-                f"[OK] {out_name}  ({n_countries} countries, "
+                f"[OK] {out_path.name}  ({n_countries} countries, "
                 f"us_erp={data.get('us_erp')}, "
                 f"source={data.get('source')})",
                 file=sys.stderr,

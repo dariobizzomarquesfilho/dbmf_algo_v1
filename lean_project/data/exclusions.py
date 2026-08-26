@@ -1,9 +1,9 @@
 """Aggregate every ticker that will NOT reach the backtest, for documentation.
 
-The download pipeline (quality gate), the embed pipeline (window-membership
-guard) and Yahoo throttling each drop or skip tickers for different reasons.
-This module consolidates them into one record so a disclaimer / coverage note
-can be generated at any time, independent of re-running the download.
+The download pipeline (quality gate) and the embed pipeline (window-membership
+guard) each drop or skip tickers for different reasons. This module
+consolidates them into one record so a disclaimer / coverage note can be
+generated at any time, independent of re-running the download.
 
 Categories:
 * ``broken``            — failed the bar-quality gate (impossible OHLC from a
@@ -14,14 +14,16 @@ Categories:
                           (unexplained gap — must be recovered or documented).
 * ``documented_unavailable`` — absent but explained in equity_unavailable.json
                           (genuine delisting / foreign-listing collision, etc.).
-* ``throttled``         — Yahoo rate-limited during the last download; re-run
-                          download_equity_data.py to recover.
+
+Yahoo rate-limiting is reported by ``repair_equity_data.py`` as its PENDING
+list on the console; throttled names are recoverable by re-running that script
+and are not tracked here.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,22 +35,11 @@ def load_unavailable(path: Optional[str]) -> dict:
     if not path or not Path(path).exists():
         return {}
     try:
-        recs = json.load(open(path, encoding="utf-8"))
+        with open(path, encoding="utf-8") as f:
+            recs = json.load(f)
         return {r["ticker"]: r.get("reason", "") for r in recs}
     except Exception:
         return {}
-
-
-def load_throttled(path: Optional[str]) -> list:
-    """Load equity_bars.throttled.txt -> list of tickers (skips # comments)."""
-    if not path or not Path(path).exists():
-        return []
-    out = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            out.append(line)
-    return out
 
 
 def collect_exclusions(
@@ -57,7 +48,6 @@ def collect_exclusions(
     win_start: str,
     win_end: str,
     unavailable_path: Optional[str] = None,
-    throttled: Optional[list] = None,
 ) -> dict:
     """Return categorized exclusions across the whole universe.
 
@@ -88,7 +78,6 @@ def collect_exclusions(
         "broken": broken,
         "missing_window": missing_window,
         "documented_unavailable": documented,
-        "throttled": list(throttled or []),
     }
 
 
@@ -100,7 +89,8 @@ def render_text_report(
     generated_utc: Optional[str] = None,
 ) -> str:
     """Render a human-readable missing-data.txt."""
-    generated_utc = generated_utc or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    if generated_utc is None:
+        generated_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = [
         "EQUITY BAR EXCLUSIONS — tickers excluded from the backtest",
         "================================================================",
@@ -110,9 +100,9 @@ def render_text_report(
         "",
         "DISCLAIMER: the tickers listed below are NOT part of the backtest's",
         "equity-bar universe. They were excluded by the data pipeline",
-        "(broken yfinance auto_adjust output, missing data, or rate-limiting),",
-        "not by the strategy. Backtest results therefore do not reflect any",
-        "position that would have been taken in these names.",
+        "(broken yfinance auto_adjust output or missing data), not by the",
+        "strategy. Backtest results therefore do not reflect any position",
+        "that would have been taken in these names.",
         "",
     ]
 
@@ -139,19 +129,13 @@ def render_text_report(
         info["documented_unavailable"],
         lambda t: info["documented_unavailable"][t],
     )
-    _sec(
-        "THROTTLED (Yahoo rate-limit; re-run download_equity_data.py)",
-        info["throttled"],
-        lambda t: "throttled",
-    )
 
     lines.append(
         "Totals: broken={broken} missing_window={missing} "
-        "documented_unavailable={doc} throttled={thr}".format(
+        "documented_unavailable={doc}".format(
             broken=len(info["broken"]),
             missing=len(info["missing_window"]),
             doc=len(info["documented_unavailable"]),
-            thr=len(info["throttled"]),
         )
     )
     return "\n".join(lines)

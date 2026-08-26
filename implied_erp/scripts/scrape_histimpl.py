@@ -33,32 +33,45 @@ import pandas as pd
 import requests
 
 HISTIMPL_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/histimpl.html"
-HISTIMPL_XLS_URL = "https://www.stern.nyu.edu/~adamodar/pc/datasets/histimpl.xls"
 
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "histimpl_us_erp.json"
 
 YEAR_MIN = 1960
-YEAR_MAX = 2025
+# Upper bound follows Damodaran's latest published year; set dynamically to
+# current year +1 so 2026+ is not silently dropped (was hardcoded 2025).
+from datetime import datetime as _dt
+YEAR_MAX = _dt.now().year + 1
 
 
 def _pct_to_float(cell) -> float | None:
     """'2.92%' -> 0.0292 ; else None.
 
     Rejects NaN / pd.NA / empty cells so missing FCFE rows are dropped.
+    Handles dash variants, N/A*, parenthesized negatives, etc.
     """
     if cell is None:
         return None
     try:
         import math
+        import pandas as pd
 
         if isinstance(cell, float) and math.isnan(cell):
             return None
-    except TypeError:
+        if cell is pd.NA:
+            return None
+    except (TypeError, ImportError):
         pass
     s = str(cell).strip()
+    if not s or s.lower() in ("nan", "nat", "none", "<na>", "—", "–", "-", "n/a", "n/a*", ""):
+        return None
+    # Parenthesized negative: (2.5%) -> -2.5%
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    s = s.replace("%", "").replace(",", "").replace("$", "").strip()
+    # Remove footnote markers e.g. 2.5* or 2.5†
+    s = re.sub(r"[*†‡]+$", "", s).strip()
     if not s or s.lower() in ("nan", "nat", "none", "<na>"):
         return None
-    s = s.replace("%", "").replace(",", "").strip()
     try:
         return float(s) / 100.0
     except ValueError:
@@ -66,21 +79,32 @@ def _pct_to_float(cell) -> float | None:
 
 
 def _find_year_table(tables: list) -> pd.DataFrame | None:
-    """Among read_html frames, pick the one with a 'Year' column."""
+    """Among read_html frames, pick the one with a 'Year' column that also has an ERP column."""
+    best = None
     for df in tables:
         cols = [str(c).lower() for c in df.columns]
         if "year" in cols:
-            return df
-    return None
+            # Prefer table that also contains an implied ERP column
+            has_erp = any("implied" in str(c).lower() and "erp" in str(c).lower() for c in df.columns)
+            if has_erp:
+                return df
+            if best is None:
+                best = df
+    return best
 
 
 def _find_erp_column(df: pd.DataFrame) -> str | None:
     """Locate the implied-ERP column: header contains 'implied' AND 'erp'."""
+    # Prefer the FCFE variant if multiple implied ERP columns exist
+    fcfe_candidate = None
     for c in df.columns:
         low = str(c).lower()
         if "implied" in low and "erp" in low:
-            return c
-    return None
+            if "fcfe" in low:
+                return c
+            if fcfe_candidate is None:
+                fcfe_candidate = c
+    return fcfe_candidate
 
 
 def parse_html(html_text: str) -> dict[str, float]:
@@ -114,9 +138,21 @@ def parse_html(html_text: str) -> dict[str, float]:
 
 
 def fetch_html(url: str = HISTIMPL_URL, timeout: int = 30) -> str:
-    resp = requests.get(url, timeout=timeout)
-    resp.raise_for_status()
-    return resp.text
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; dbmf-quant; +https://github.com/anomalyco/opencode)"}
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, timeout=timeout, headers=headers)
+            resp.raise_for_status()
+            return resp.text
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            if attempt < 2:
+                import time
+                time.sleep(1.5 * (2 ** attempt))
+                continue
+            raise
+    raise last_exc  # type: ignore[misc]
 
 
 def scrape(

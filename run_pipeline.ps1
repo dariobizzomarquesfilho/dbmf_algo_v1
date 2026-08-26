@@ -24,14 +24,17 @@ if (-not (Test-Path $VenvActivate)) {
     Write-Host "  Create it first, e.g.:" -ForegroundColor Yellow
     Write-Host "    python -m venv .venv" -ForegroundColor Yellow
     Write-Host "    .\.venv\Scripts\Activate.ps1" -ForegroundColor Yellow
-    Write-Host "    pip install -r requirements.txt" -ForegroundColor Yellow
+    Write-Host "    pip install -r config/requirements.txt" -ForegroundColor Yellow
     exit 1
 }
 . $VenvActivate
 
-# --- Logging ----------------------------------------------------------------
+# --- Logging (per-run folder: logs/<yyyyMMdd_HHmmss>/) --------------------------
+$script:runStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$script:runLogDir = Join-Path $RepoRoot ("logs\" + $script:runStamp)
+New-Item -ItemType Directory -Force -Path $script:runLogDir | Out-Null
 try {
-    Start-Transcript -Path (Join-Path $RepoRoot "run_pipeline.log") -Append | Out-Null
+    Start-Transcript -Path (Join-Path $script:runLogDir "run_pipeline.log") | Out-Null
 } catch {
     Write-Host "WARN: could not start transcript: $_" -ForegroundColor Yellow
 }
@@ -49,9 +52,7 @@ function Invoke-Step {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $LASTEXITCODE = 0
 
-    $logDir = Join-Path $RepoRoot "logs"
-    $log = Join-Path $logDir ("step{0:00}-{1}.log" -f $script:Idx, $Name.Replace(' ', '_'))
-    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $log = Join-Path $script:runLogDir ("step{0:00}-{1}.log" -f $script:Idx, $Name.Replace(' ', '_'))
 
     # Capture merged stdout/stderr into a variable FIRST so $LASTEXITCODE keeps
     # the action's real exit code (piping straight to Tee-Object would reset it
@@ -76,7 +77,7 @@ function Invoke-Step {
     $stepOut = $raw | ForEach-Object {
         if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
     }
-    $stepOut | Tee-Object -FilePath $log -Append
+    $stepOut | Tee-Object -FilePath $log | Out-Null
 
     $sw.Stop()
     if ($code -ne 0) {
@@ -115,6 +116,7 @@ Add-Step "Download edgartools PIT fundamentals"    { python lean_project/scripts
 Add-Step "Download equity bars"                    { python lean_project/scripts/download_equity_data.py }
 Add-Step "Repair equity bars (Yahoo retry)"         { python lean_project/scripts/repair_equity_data.py }
 Add-Step "Recover missing delisted bars"           { python lean_project/scripts/fetch_missing_delisted.py --apply }
+Add-Step "Track exclusions (missing-data report)"  { python lean_project/scripts/track_exclusions.py } -Soft $true
 Add-Step "Convert to QC zip format"                { python lean_project/scripts/convert_to_qc_format.py }
 Add-Step "Embed data into Lean modules"            { python lean_project/scripts/embed_data.py }   # hard-requires PIT history
 

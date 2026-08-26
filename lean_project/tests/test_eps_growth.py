@@ -4,6 +4,8 @@ Mirrors the pattern of tests/test_pit_data.py — no Lean imports.
 """
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from scripts.download_edgartools_data import compute_pit_eps_growth, get_parent_equity
@@ -15,13 +17,16 @@ from scripts.download_edgartools_data import compute_pit_eps_growth, get_parent_
 
 
 def test_cagr_exact_two_years():
-    """(2.0 / 1.0)^(1/2) - 1 = 0.4142…"""
+    """Ratio 2.0 over true day-count delta (2024 is a leap year, so
+    2022-06-30 -> 2024-06-30 is 731 days ≈ 2.0021 years, not exactly 2)."""
+    d0, d1 = date(2022, 6, 30), date(2024, 6, 30)
+    years = (d1 - d0).days / 365.25
     pairs = [
         ("2022-06-30", 1.0),
         ("2024-06-30", 2.0),
     ]
     result = compute_pit_eps_growth(pairs, years=2)
-    assert result["2024-06-30"] == pytest.approx(0.4142, abs=1e-4)
+    assert result["2024-06-30"] == pytest.approx(2.0 ** (1.0 / years) - 1, rel=1e-9)
 
 
 def test_negative_eps_returns_none():
@@ -54,12 +59,14 @@ def test_ref_must_be_strictly_past():
 
 def test_negative_cagr_preserved():
     """EPS declined — negative CAGR returned as-is (no floor)."""
+    d0, d1 = date(2022, 6, 30), date(2024, 6, 30)
+    years = (d1 - d0).days / 365.25
     pairs = [
         ("2022-06-30", 2.0),
         ("2024-06-30", 1.0),
     ]
     result = compute_pit_eps_growth(pairs, years=2)
-    assert result["2024-06-30"] == pytest.approx(-0.2929, abs=1e-4)
+    assert result["2024-06-30"] == pytest.approx(0.5 ** (1.0 / years) - 1, rel=1e-9)
 
 
 def test_no_cap_or_floor():
@@ -74,15 +81,30 @@ def test_no_cap_or_floor():
 
 
 def test_calendar_lookup_not_index_based():
-    """With a gap in the series the ref is found by date, not index."""
+    """With a gap in the series the ref is found by date, not index, and the
+    CAGR is annualized over the ACTUAL period delta."""
     pairs = [
         ("2020-06-30", 1.0),
         # gap — no 2021 or 2022 data
         ("2024-06-30", 4.0),
     ]
     result = compute_pit_eps_growth(pairs, years=2)
-    # 2024-06-30 - 2y = 2022-06-30; latest <= that is 2020-06-30
-    assert result["2024-06-30"] == pytest.approx(1.0, abs=1e-4)  # sqrt(4) - 1
+    # 2024-06-30 - 2y = 2022-06-30; latest <= that is 2020-06-30.
+    # Actual delta = 4 years -> annualized growth is 4 ** (1/4) - 1
+    assert result["2024-06-30"] == pytest.approx(4 ** 0.25 - 1, abs=1e-4)
+
+
+def test_actual_delta_annualization_two_year_spacing():
+    """Exactly-two-year spacing keeps the classic sqrt(ratio) behavior."""
+    pairs = [
+        ("2022-06-30", 2.0),
+        ("2024-07-01", 3.0),
+    ]
+    result = compute_pit_eps_growth(pairs, years=2)
+    # ref must be <= 2024-07-01 minus ~2y (730.5 days): 2022-06-30 qualifies;
+    # actual delta ≈ 2.00 years → growth ≈ sqrt(1.5) - 1 regardless of the
+    # small day-count excess vs the nominal cutoff.
+    assert result["2024-07-01"] == pytest.approx((3.0 / 2.0) ** 0.5 - 1, rel=0.01)
 
 
 def test_empty_series():

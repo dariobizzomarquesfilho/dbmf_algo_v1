@@ -298,8 +298,14 @@ def compute_pit_eps_growth(sorted_pairs: list, years: int = 2) -> dict:
         if eps_ref is None or eps_ref <= 0:
             result[period] = None
             continue
-        n_years = years
-        cagr = (eps_now / eps_ref) ** (1.0 / n_years) - 1
+        # Annualize over the ACTUAL calendar delta between the two period dates
+        # (not the fixed `years` cutoff), so gaps in the series and leap-year
+        # day-counts are handled correctly. `ref_idx` is strictly before `i`,
+        # so the delta is always positive.
+        d_now = datetime.strptime(period, "%Y-%m-%d").date()
+        d_ref = datetime.strptime(periods[ref_idx], "%Y-%m-%d").date()
+        actual_years = (d_now - d_ref).days / 365.25
+        cagr = (eps_now / eps_ref) ** (1.0 / actual_years) - 1
         result[period] = cagr
 
     return result
@@ -392,6 +398,7 @@ def get_quarterly_history(
     # Parse financials only for in-window candidates. De-duplicate by period
     # (keep the last occurrence) so an amendment double-count cannot happen.
     by_period: dict = {}
+    parse_failures = 0
     for period, f in candidates:
         try:
             tenq = f.obj()
@@ -401,7 +408,12 @@ def get_quarterly_history(
             eq = _clean(get_parent_equity(tenq, fin))
             shares_diluted = _clean(fin.get_shares_outstanding_diluted())
             shares_basic = _clean(fin.get_shares_outstanding_basic())
-            shares = shares_diluted or shares_basic or _clean(company.shares_outstanding)
+            # PIT integrity: never fall back to company-level *current* shares
+            # outstanding — that would stamp today's share count onto
+            # historical quarters. If neither per-period XBRL tag exists,
+            # leave ``shares`` None: the quarter's book_value/eps become None
+            # and the screen skips it instead of silently using look-ahead data.
+            shares = shares_diluted or shares_basic
             by_period[period] = {
                 "period": period,
                 "revenue": rev,
@@ -410,7 +422,30 @@ def get_quarterly_history(
                 "shares": shares,
             }
         except Exception:
+            parse_failures += 1
             continue
+
+    if parse_failures:
+        # One summary line instead of per-filing spam: silent data loss here
+        # would otherwise shrink TTM windows without any trace in the log.
+        # Company has no .ticker attr (use get_ticker()), fall back to CIK.
+        try:
+            _ticker_label = company.get_ticker()  # type: ignore[attr-defined]
+        except Exception:
+            _ticker_label = None
+        if not _ticker_label:
+            try:
+                _t = getattr(company, "tickers", None)
+                _ticker_label = _t[0] if isinstance(_t, (list, tuple)) and _t else None
+            except Exception:
+                _ticker_label = None
+        if not _ticker_label:
+            _ticker_label = str(getattr(company, "cik", "unknown"))
+        print(
+            f"WARN: {_ticker_label}: {parse_failures}/{len(candidates)} 10-Q "
+            f"filings failed to parse (periods dropped)",
+            file=sys.stderr,
+        )
 
     if not by_period:
         return {}
@@ -484,6 +519,53 @@ def _write_history(out_path: Path, history: dict, backup: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Persisted skip-set resolution (with CIK-map TTL)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_skip_set(
+    skip_path: Path,
+    cik_map_path: Path,
+    force: bool,
+    clean_skip: bool,
+) -> set:
+    """Load the persisted skip set, applying --clean-skip and a CIK-map TTL.
+
+    - ``--clean-skip`` deletes the skip file on disk so every previously-skipped
+      ticker is re-probed this run.
+    - TTL: if the CIK map was modified *after* the skip file was written, the
+      skip set is cleared (returned empty) so tickers that may now resolve via a
+      freshly-curated CIK are retried. The file on disk is NOT deleted unless
+      ``--clean-skip`` is set.
+    """
+    if clean_skip and skip_path.exists():
+        try:
+            skip_path.unlink()
+            print(f"--clean-skip: removed {skip_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"WARN: --clean-skip could not remove {skip_path}: {e}", file=sys.stderr)
+
+    cik_map_mtime = cik_map_path.stat().st_mtime if cik_map_path.exists() else 0
+    skip_mtime = skip_path.stat().st_mtime if skip_path.exists() else 0
+
+    skip_set: set = set()
+    if skip_path.exists() and not force:
+        try:
+            skip_set = set(json.load(open(skip_path, encoding="utf-8")))
+        except Exception as e:
+            print(f"WARN: could not load {skip_path.name}: {e}", file=sys.stderr)
+        # CIK map newer than the skip file -> re-probe all skipped tickers.
+        if skip_mtime < cik_map_mtime:
+            print(
+                "CIK map updated since skip file; retrying "
+                f"{len(skip_set)} previously-skipped tickers",
+                file=sys.stderr,
+            )
+            skip_set = set()
+    return skip_set
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -525,6 +607,12 @@ def main():
         action="store_true",
         help="Re-fetch tickers already present in the existing output (resume "
              "skips completed tickers by default)",
+    )
+    parser.add_argument(
+        "--clean-skip",
+        action="store_true",
+        help="Delete the persisted skip file (fundamentals_no_edgar_match.json) "
+             "before running so previously-skipped tickers are re-probed.",
     )
     args = parser.parse_args()
 
@@ -570,17 +658,14 @@ def main():
 
     # Persisted skip set: tickers with no edgar match (delisted without a
     # curated CIK). Re-checked each run; a ticker present in the CIK map is
-    # never hard-skipped, so later curation can recover it.
+    # never hard-skipped, so later curation can recover it. --clean-skip and a
+    # CIK-map TTL are applied here (see _resolve_skip_set).
     skip_path = out_dir / "fundamentals_no_edgar_match.json"
-    skip_set: set = set()
-    if skip_path.exists() and not args.force:
-        try:
-            skip_set = set(json.load(open(skip_path, encoding="utf-8")))
-            print(
-                f"Resuming skip set: {len(skip_set)} tickers", file=sys.stderr
-            )
-        except Exception as e:
-            print(f"WARN: could not load {skip_path.name}: {e}", file=sys.stderr)
+    skip_set = _resolve_skip_set(
+        skip_path, _CIK_MAP_PATH, args.force, getattr(args, "clean_skip", False)
+    )
+    if skip_path.exists() and skip_set:
+        print(f"Resuming skip set: {len(skip_set)} tickers", file=sys.stderr)
 
     def _write_skip(path: Path, skip_set: set, backup: bool) -> None:
         if backup and path.exists():

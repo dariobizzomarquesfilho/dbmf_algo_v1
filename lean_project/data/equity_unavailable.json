@@ -1,22 +1,8 @@
 [
   {
-    "ticker": "ADS",
-    "start": "2013-12-23",
-    "end": "2020-06-22",
-    "source": "tiingo",
-    "reason": "excluded_complex"
-  },
-  {
     "ticker": "ADT",
     "start": "2012-10-02",
     "end": "2016-05-02",
-    "source": "tiingo",
-    "reason": "tiingo_no_prices"
-  },
-  {
-    "ticker": "ALTR",
-    "start": "2000-04-18",
-    "end": "2015-12-28",
     "source": "tiingo",
     "reason": "tiingo_no_prices"
   },
@@ -28,16 +14,9 @@
     "reason": "tiingo_no_prices"
   },
   {
-    "ticker": "APOL",
-    "start": "2002-05-15",
-    "end": "2013-07-01",
-    "source": "tiingo",
-    "reason": "tiingo_no_prices"
-  },
-  {
-    "ticker": "ATGE",
-    "start": "2009-06-09",
-    "end": "2012-10-01",
+    "ticker": "BBBY",
+    "start": "1999-10-01",
+    "end": "2017-07-26",
     "source": "tiingo",
     "reason": "tiingo_no_prices"
   },
@@ -49,13 +28,6 @@
     "reason": "tiingo_no_prices"
   },
   {
-    "ticker": "BIG",
-    "start": "1998-01-20",
-    "end": "2013-02-14",
-    "source": "tiingo",
-    "reason": "tiingo_no_prices"
-  },
-  {
     "ticker": "BK",
     "start": "1996-01-02",
     "end": "2026-05-21",
@@ -63,59 +35,52 @@
     "reason": "tiingo_no_prices"
   },
   {
-    "ticker": "BTUUQ",
-    "start": "2006-11-20",
-    "end": "2014-09-22",
-    "source": "tiingo",
-    "reason": "tiingo_no_prices"
-  },
-  {
-    "ticker": "CA",
+    "ticker": "LB",
     "start": "1996-01-02",
-    "end": "2018-11-06",
+    "end": "2021-08-03",
     "source": "tiingo",
     "reason": "tiingo_no_prices"
   },
   {
-    "ticker": "CBS",
+    "ticker": "LIFE",
+    "start": "2008-11-24",
+    "end": "2014-01-24",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "MMI",
+    "start": "2011-01-04",
+    "end": "2012-05-22",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "NE",
+    "start": "2001-01-16",
+    "end": "2015-07-20",
+    "source": "tiingo",
+    "reason": "tiingo_no_prices"
+  },
+  {
+    "ticker": "S",
     "start": "1996-01-02",
-    "end": "2019-12-05",
+    "end": "2013-07-09",
     "source": "tiingo",
     "reason": "tiingo_no_prices"
   },
   {
-    "ticker": "CCE",
-    "start": "1998-10-08",
-    "end": "2016-05-31",
+    "ticker": "STI",
+    "start": "1996-01-02",
+    "end": "2019-12-09",
     "source": "tiingo",
     "reason": "tiingo_no_prices"
   },
   {
-    "ticker": "CDAY",
-    "start": "2021-09-20",
-    "end": "2024-02-01",
-    "source": "tiingo",
-    "reason": "excluded_complex"
-  },
-  {
-    "ticker": "CEPH",
-    "start": "2008-11-17",
-    "end": "2011-10-14",
+    "ticker": "TE",
+    "start": "2001-10-10",
+    "end": "2016-07-01",
     "source": "tiingo",
     "reason": "tiingo_no_prices"
-  },
-  {
-    "ticker": "WIN",
-    "start": "2006-07-18",
-    "end": "2015-04-07",
-    "source": "tiingo",
-    "reason": "tiingo_no_prices"
-  },
-  {
-    "ticker": "WRK",
-    "start": "2015-07-02",
-    "end": "2024-07-08",
-    "source": "tiingo",
-    "reason": "excluded_complex"
   }
 ]

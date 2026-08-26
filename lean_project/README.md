@@ -7,7 +7,7 @@ QuantConnect Lean backtest for the DBMF Quant strategy. Screens S&P 500 constitu
 ```
 Embedded data (zlib+base64)
     │
-    ├── equity_bars.py            → 502 tickers + ^GSPC + ^TNX × 751 daily bars
+    ├── equity_bars.py            → full S&P 500 history + ^GSPC + ^TNX daily bars
     ├── damodaran_erp_history.py  → US ERP PIT series (2001-2026, per-date lookup)
     └── fundamentals_history.py   → per-company quarterly PIT book_value / roe / eps / g_eps
     │
@@ -22,17 +22,16 @@ PbRoeAtrAlgorithm (main.py)
     ├── Initialize()
     │     ├── Load all embedded data (no disk I/O)
     │     ├── Bootstrap CSV.zip files into Lean data folder
-    │     ├── AddEquity() for all ~500 tickers
+    │     ├── AddEquity() for members active at the start date
     │     └── OnData triggers DailyRebalance on each new trading day
     │
-    ├── CoarseSelection()    → DollarVolume > $10M filter
-    ├── FineSelection()      → P/B vs ROE Gordon-growth screen
-    │
-    └── DailyRebalance()
-          ├── _ensure_prices()     → SetMarketPrice from embedded bars
-          ├── _check_stops()       → ATR trailing stop exit
-          ├── run_fine_selection() → Rescreen universe
-          └── SetHoldings / Liquidate
+    ├── OnData()
+    │     ├── _ensure_subscribed() → AddEquity on index-add dates (PIT guard)
+    │     └── DailyRebalance()
+    │           ├── _ensure_prices()     → SetMarketPrice from embedded bars
+    │           ├── _check_stops()       → ATR trailing stop exit
+    │           ├── run_fine_selection() → P/B vs ROE Gordon-growth rescreen
+    │           └── SetHoldings / Liquidate / membership + spinoff exits
 ```
 
 ## Architecture
@@ -42,11 +41,15 @@ lean_project/
 ├── main.py                  # Algorithm entry point
 ├── lean.json                # Lean v2 config
 ├── data/
-│   ├── equity_bars.py            # Embedded daily equity bars (auto-generated)
+│   ├── equity_bars.py            # Embedded daily bars (auto-generated)
 │   ├── fundamentals_history.py   # Embedded quarterly PIT history (auto-generated)
 │   ├── bootstrap_data.py        # Writes CSV.zip to Lean data folder
 │   ├── equity_bars.json         # Source bars data (for regeneration)
 │   ├── fundamentals_history.json # Source quarterly PIT history (TTM per quarter, edgartools)
+│   ├── sp500_data.py            # S&P 500 PIT membership utilities
+│   ├── corporate_actions.py     # Curated spinoff exits + membership-end exits
+│   ├── bar_quality.py           # Bar-quality gate (ticker_quality_verdict)
+│   ├── exclusions.py            # Aggregate excluded tickers for the report
 │   ├── equity/                   # Lean equity .zip files (daily bars)
 │   └── alternative/
 │       └── interest-rate/usa/interest-rate.csv  # Fixed: dates now in YYYY-MM-DD format
@@ -56,10 +59,8 @@ lean_project/
 │   └── atr_trailing_stop.py  # ATR trailing stop computation
 ├── valuation/
 │   └── gordon_growth.py      # Intrinsic P/B (2-stage Gordon growth)
-├── scripts/
-│   ├── embed_data.py           # Build: JSON → embedded Python modules
-│   ├── download_equity_data.py   # Fetch S&P 500 bars via yfinance
-│   └── convert_to_qc_format.py   # Convert to QC zip format
+├── scripts/                  # Download / repair / embed pipeline (+ common.py helpers)
+├── tests/                    # pytest suite
 └── Lean/                     # QuantConnect Lean framework
 ```
 
@@ -75,7 +76,7 @@ lean backtest
 lean backtest --config lean.json
 ```
 
-The backtest runs from **2020-01-01 to 2026-08-01** (configured in `config/config.py` via `BACKTEST_START`/`BACKTEST_END`, env-overridable) with $100,000 initial capital. Equity bar data must additionally cover a warm-up window before `BACKTEST_START` (>= `BACKTEST_WARMUP_DAYS` trading days, default 252) so rolling indicators like beta/ATR have enough prior bars. `scripts/download_equity_data.py` pulls from `config.DATA_START` (warm-up) through `config.BACKTEST_END`; `scripts/embed_data.py` hard-fails if coverage is missing.
+The backtest window comes from `config/.env` (`BACKTEST_START`/`BACKTEST_END`, env-overridable) and is propagated through `config/config.py` → `data/backtest_config.py` → `lean.json`; re-run `python scripts/embed_data.py` after changing `.env`. Initial capital is $100,000. Equity bar data must additionally cover a warm-up window before `BACKTEST_START` (>= `BACKTEST_WARMUP_DAYS` trading days, default 252) so rolling indicators like beta/ATR have enough prior bars. `scripts/download_equity_data.py` pulls from `config.HISTORY_START` through `config.BACKTEST_END`; `scripts/embed_data.py` hard-fails if coverage is missing.
 
 ## Key Files Explained
 
@@ -93,7 +94,7 @@ Writes embedded equity bars as CSV.zip files into Lean's data folder. At runtime
 3. Writes `<ticker>.zip` (lowercase, no .csv extension) with no-header 6-column CSV: `YYYYMMDD HH:MM,open,high,low,close,volume`
 4. Writes `map_files/<ticker>.csv` for SecurityIdentifier resolution
 
-### `data/embed_data.py`
+### `scripts/embed_data.py`
 Build script that converts JSON data files to embedded Python modules using zlib compression + base64 encoding. Run after updating any source JSON file.
 
 ### `universe/pb_roe_universe.py`
@@ -148,7 +149,7 @@ The archive downloader generates URLs from the predictable naming pattern (`ctry
 
 **PIT data requirement:** The point-in-time screening path (`fundamental_as_of` + `rolling_beta`) requires complete quarterly history for all tickers covering the full backtest period. edgartools pulls quarterly 10-Q data directly from SEC EDGAR, providing TTM fundamentals per quarter going back to 2019. **Before running the backtest, ensure `fundamentals_history.json` has quarterly data going back to at least the backtest start date.** If data is incomplete, the screen will return empty results for dates without quarterly coverage and no positions will be taken. Do NOT use stale static snapshots as a fallback — this would introduce look-ahead bias.
 
-**edgartools (primary source for SEC data):** Pulls quarterly 10-Q data directly from SEC EDGAR via the `edgar` Python package. Provides TTM revenue, net_income, equity, and shares per quarter. No API key required. Rate-limited to ~10 requests/second by SEC.
+**edgartools (primary source for SEC data):** Pulls quarterly 10-Q data directly from SEC EDGAR via the `edgar` Python module (provided by the pinned `edgartools` package). Provides TTM revenue, net_income, equity, and shares per quarter. No API key required. Rate-limited to ~10 requests/second by SEC.
 
 ```powershell
 # Download quarterly PIT fundamentals from SEC filings
@@ -160,21 +161,6 @@ python scripts/download_edgartools_data.py --tickers AAPL MSFT GOOG
 # Control backtest start date for history
 python scripts/download_edgartools_data.py --backtest-start 2019-01-01
 ```
-
-**FMP bulk download (alternative for initial historical data):** FinancialModelingPrep's free tier (250 calls/day) provides 40+ quarters of quarterly balance sheet and income statement data per ticker. Use this if edgartools is too slow for a full S&P 500 run.
-
-```powershell
-# One-time full historical download (2020-2026, cached to disk)
-python scripts/download_fmp_history.py
-
-# Or integrate into the standard download pipeline
-python scripts/download_equity_data.py --fmp-history
-
-# Force re-download all tickers (skip cache)
-python scripts/download_fmp_history.py --force
-```
-
-The FMP downloader uses 3 API keys in round-robin to stay under the 250/day limit per key. Results are cached per-ticker in `data/.fmp_cache_<ticker>.json` and merged into `data/fundamentals_history.json`. Subsequent runs skip tickers that already have cached data for the target period.
 
 **Point-in-time refresh model:** `fundamentals_history.json` (embedded as `data/fundamentals_history.py`) stores each company's quarterly `book_value` / `roe` / `eps` / `revenue_ttm` / `net_income_ttm` on its own quarter-end cadence, computed as TTM from SEC 10-Q filings via edgartools. The screen reads the latest quarter at-or-before the backtest date via `fundamental_as_of()`, and computes a rolling 252-day beta (vs `^GSPC` from embedded bars) only when scanning for a buy (initial fill or post-stop refill). No look-ahead, zero network at runtime. Re-run the download pipeline at least quarterly so each company's future quarters get refreshed.
 
@@ -200,7 +186,6 @@ After step 4, commit the regenerated `data/*_json.py`, `data/*_bars.py`, `data/f
 
 1. **Interest rate CSV**: `data/alternative/interest-rate/usa/interest-rate.csv` had dates in `YYYYMMDD` format which Lean couldn't parse. Fixed by converting to `YYYY-MM-DD`. The strategy uses ^TNX from embedded bars for the risk-free rate, so this file is cosmetic only.
 2. **82% max drawdown**: Strategy design concern, not a bug.
-3. **No test suite**: No automated tests exist yet.
-4. **yfinance negative bookValue**: yfinance returns negative `bookValue` and `priceToBook` for ~33 S&P 500 tickers (SBUX, MCD, ABBV, LOW, etc.). These tickers are skipped per-screen when book_value is invalid — they are not dropped from the cache and may have valid book_value in a future quarter after refresh. P/B is always computed dynamically as `current_price / book_value` for the correct time period.
-5. **PIT data coverage gap**: yfinance only returns the most recent ~7 quarters per ticker. The `fundamentals_history.json` may not cover the full backtest period (configured window). When quarterly data is unavailable for a ticker at a given backtest date, the screen skips that ticker (no static fallback — using current data for historical dates would be look-ahead bias). Use `python scripts/download_fmp_history.py` for bulk historical download (40+ quarters per ticker via FMP free tier), then `python scripts/download_edgartools_data.py` periodically to accumulate new quarters via SEC filings.
-6. **No linter or formatter**: No `flake8`, `black`, `ruff`, or `pylint` configuration.
+3. **yfinance negative bookValue**: yfinance returns negative `bookValue` and `priceToBook` for ~33 S&P 500 tickers (SBUX, MCD, ABBV, LOW, etc.). These tickers are skipped per-screen when book_value is invalid — they are not dropped from the cache and may have valid book_value in a future quarter after refresh. P/B is always computed dynamically as `current_price / book_value` for the correct time period.
+4. **PIT coverage depth varies by ticker**: edgartools XBRL facts reach back to ~2009 and many later-added S&P 500 names only gained fundamentals ~2019, so early-window universes are thinner (SEC source limit). When quarterly data is unavailable for a ticker at a given backtest date, the screen skips it (no static fallback — using current data for historical dates would be look-ahead bias). Run `python scripts/download_edgartools_data.py` periodically to accumulate new quarters via SEC filings.
+5. **No linter or formatter configured**: No `flake8`, `black`, `ruff`, or `pylint` configuration.

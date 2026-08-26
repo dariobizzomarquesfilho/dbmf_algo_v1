@@ -150,6 +150,12 @@ def validate_data_coverage(
         sys.path.insert(0, str(lean_project))
     from data.sp500_data import load_sp500_membership  # noqa: E402
 
+    # scripts dir (for the shared fundamentals-ticker helper)
+    _script_dir = Path(__file__).resolve().parent
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+    from common import load_fundamentals_tickers  # noqa: E402
+
     print("Validating data coverage against configured window...")
     print(f"  Required range: {config.DATA_START} (warm-up) .. {config.BACKTEST_END}")
 
@@ -159,19 +165,19 @@ def validate_data_coverage(
             bars = json.load(f)
     except FileNotFoundError:
         print(f"ERROR: equity bars file not found: {equity_bars_path}")
-        sys.exit(1)
+        return False
 
     earliest, latest = _min_max_dates(bars)
     if earliest is None:
         print("ERROR: equity_bars.json contains no bars")
-        sys.exit(1)
+        return False
 
     if earliest > config.DATA_START:
         print(
             f"ERROR: equity bars start at {earliest} but warm-up requires "
             f"<= {config.DATA_START}. Re-run download_equity_data.py."
         )
-        sys.exit(1)
+        return False
 
     # End check: BACKTEST_END may be a non-trading day (weekend/holiday), so
     # tolerate the last bar being within a few calendar days of BACKTEST_END.
@@ -185,7 +191,7 @@ def validate_data_coverage(
             f">= {config.BACKTEST_END} (gap of {_end_diff} days). "
             f"Re-run download_equity_data.py."
         )
-        sys.exit(1)
+        return False
     print(f"  Equity bars OK: {earliest} .. {latest} ({len(bars)} tickers)")
 
     # --- Per-current-member guard (second pass) ---------------------------------
@@ -201,6 +207,10 @@ def validate_data_coverage(
         print(f"WARN: membership CSV not found at {csv_path}; skipping per-member check")
     else:
         membership = load_sp500_membership(str(csv_path))
+        # Tradeable universe = tickers with PIT fundamentals (plus required
+        # indices). A current S&P 500 member that has no fundamentals history is
+        # not part of the screenable universe, so it is not required to have bars.
+        fundamentals_keys = load_fundamentals_tickers(fundamentals_path)
         data_start = config.DATA_START
         end_diff_max = 4  # tolerate non-trading final day (weekend/holiday)
         missing_current = []
@@ -208,6 +218,8 @@ def validate_data_coverage(
             current = [(s, e) for s, e in intervals if e is None]
             if not current:
                 continue  # not a current member
+            if ticker not in fundamentals_keys:
+                continue  # not in the tradeable (fundamentals) universe
             tb = bars.get(ticker)
             if not tb:
                 missing_current.append((ticker, "no bars at all"))

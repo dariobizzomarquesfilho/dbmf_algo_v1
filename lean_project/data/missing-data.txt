@@ -1,97 +1,242 @@
 EQUITY BAR EXCLUSIONS — tickers excluded from the backtest
 ================================================================
-Generated (UTC): 2026-08-11T11:18:40Z
-Backtest window: 2020-01-01 .. 2026-07-31
-Source bars:     equity_bars.json (791 tickers)
+Generated (UTC): 2026-08-26T13:19:44Z
+Backtest window: 2011-01-01 .. 2026-07-31
+Source bars:     equity_bars.json (640 tickers)
 
 DISCLAIMER: the tickers listed below are NOT part of the backtest's
 equity-bar universe. They were excluded by the data pipeline
-(broken yfinance auto_adjust output, missing data, or rate-limiting),
-not by the strategy. Backtest results therefore do not reflect any
-position that would have been taken in these names.
+(broken yfinance auto_adjust output or missing data), not by the
+strategy. Backtest results therefore do not reflect any position
+that would have been taken in these names.
 
 == BROKEN (quality gate: malformed / all-zero / wrong-instrument data) ==
-  DEC      malformed_rows 691/1359
-  TNB      extreme_moves 305/784
+  (none)
 
 == MISSING WINDOW MEMBERS (in S&P 500 window, absent, UNEXPLAINED) ==
+  AABA     absent from bars, not documented
   ABC      absent from bars, not documented
   ABMD     absent from bars, not documented
   ADS      absent from bars, not documented
+  AET      absent from bars, not documented
   AGN      absent from bars, not documented
+  AKS      absent from bars, not documented
+  ALTR     absent from bars, not documented
   ALXN     absent from bars, not documented
+  ANDV     absent from bars, not documented
+  ANRZQ    absent from bars, not documented
   ANSS     absent from bars, not documented
   ANTM     absent from bars, not documented
+  APOL     absent from bars, not documented
+  ARG      absent from bars, not documented
   ARNC     absent from bars, not documented
+  ATGE     absent from bars, not documented
   ATVI     absent from bars, not documented
-  BK       absent from bars, not documented
+  AVP      absent from bars, not documented
+  AYE      absent from bars, not documented
+  BCR      absent from bars, not documented
+  BHGE     absent from bars, not documented
+  BIG      absent from bars, not documented
   BLL      absent from bars, not documented
+  BMC      absent from bars, not documented
+  BMS      absent from bars, not documented
+  BRCM     absent from bars, not documented
+  BTUUQ    absent from bars, not documented
+  BXLT     absent from bars, not documented
+  CA       absent from bars, not documented
+  CAM      absent from bars, not documented
+  CBE      absent from bars, not documented
+  CBS      absent from bars, not documented
+  CCE      absent from bars, not documented
+  CCEP     absent from bars, not documented
   CDAY     absent from bars, not documented
+  CEPH     absent from bars, not documented
   CERN     absent from bars, not documented
+  CFN      absent from bars, not documented
+  CHK      absent from bars, not documented
   CMA      absent from bars, not documented
+  CMCSK    absent from bars, not documented
   COG      absent from bars, not documented
+  COL      absent from bars, not documented
+  COV      absent from bars, not documented
+  CPGX     absent from bars, not documented
+  CSRA     absent from bars, not documented
   CTL      absent from bars, not documented
   CTLT     absent from bars, not documented
   CTRA     absent from bars, not documented
   CTXS     absent from bars, not documented
+  CVC      absent from bars, not documented
+  CVH      absent from bars, not documented
   CXO      absent from bars, not documented
   DAY      absent from bars, not documented
+  DF       absent from bars, not documented
   DFS      absent from bars, not documented
   DISCA    absent from bars, not documented
   DISCK    absent from bars, not documented
   DISH     absent from bars, not documented
+  DNB      absent from bars, not documented
+  DNR      absent from bars, not documented
+  DO       absent from bars, not documented
   DRE      absent from bars, not documented
+  DTV      absent from bars, not documented
+  DWDP     absent from bars, not documented
+  EMC      absent from bars, not documented
+  ENDP     absent from bars, not documented
+  ESRX     absent from bars, not documented
+  ESV      absent from bars, not documented
   ETFC     absent from bars, not documented
+  EVHC     absent from bars, not documented
+  FB       absent from bars, not documented
   FBHS     absent from bars, not documented
+  FDO      absent from bars, not documented
+  FDXF     absent from bars, not documented
   FI       absent from bars, not documented
+  FII      absent from bars, not documented
+  FL       absent from bars, not documented
   FLIR     absent from bars, not documented
   FLT      absent from bars, not documented
   FRC      absent from bars, not documented
+  FRX      absent from bars, not documented
+  FTR      absent from bars, not documented
+  GAS      absent from bars, not documented
+  GENZ     absent from bars, not documented
+  GGP      absent from bars, not documented
+  GMCR     absent from bars, not documented
   GPS      absent from bars, not documented
+  GR       absent from bars, not documented
+  HAR      absent from bars, not documented
   HBI      absent from bars, not documented
+  HCBK     absent from bars, not documented
+  HCP      absent from bars, not documented
   HES      absent from bars, not documented
   HFC      absent from bars, not documented
+  HNZ      absent from bars, not documented
   HOLX     absent from bars, not documented
+  HOT      absent from bars, not documented
+  HRL      absent from bars, not documented
+  HRS      absent from bars, not documented
+  HSH      absent from bars, not documented
+  HSP      absent from bars, not documented
+  IGT      absent from bars, not documented
+  INFO     absent from bars, not documented
   IPG      absent from bars, not documented
+  JCP      absent from bars, not documented
+  JEC      absent from bars, not documented
   JNPR     absent from bars, not documented
+  JNS      absent from bars, not documented
+  JOY      absent from bars, not documented
   JWN      absent from bars, not documented
   K        absent from bars, not documented
+  KORS     absent from bars, not documented
+  KRFT     absent from bars, not documented
   KSU      absent from bars, not documented
+  LLL      absent from bars, not documented
+  LLTC     absent from bars, not documented
+  LM       absent from bars, not documented
+  LO       absent from bars, not documented
+  LSI      absent from bars, not documented
+  LVLT     absent from bars, not documented
+  LXK      absent from bars, not documented
+  MDP      absent from bars, not documented
+  MEE      absent from bars, not documented
+  MFE      absent from bars, not documented
+  MHS      absent from bars, not documented
+  MI       absent from bars, not documented
+  MJN      absent from bars, not documented
   MMC      absent from bars, not documented
+  MNK      absent from bars, not documented
+  MOLX     absent from bars, not documented
+  MON      absent from bars, not documented
   MRO      absent from bars, not documented
+  MWV      absent from bars, not documented
+  MWW      absent from bars, not documented
   MXIM     absent from bars, not documented
   MYL      absent from bars, not documented
   NBL      absent from bars, not documented
+  NFX      absent from bars, not documented
   NLOK     absent from bars, not documented
   NLSN     absent from bars, not documented
-  PARA     absent from bars, not documented
+  NOVL     absent from bars, not documented
+  NSM      absent from bars, not documented
+  NVLS     absent from bars, not documented
+  NYX      absent from bars, not documented
   PBCT     absent from bars, not documented
+  PCL      absent from bars, not documented
+  PCP      absent from bars, not documented
+  PDCO     absent from bars, not documented
   PEAK     absent from bars, not documented
+  PETM     absent from bars, not documented
+  PGN      absent from bars, not documented
   PKI      absent from bars, not documented
+  PLL      absent from bars, not documented
+  POM      absent from bars, not documented
+  PX       absent from bars, not documented
   PXD      absent from bars, not documented
+  QEP      absent from bars, not documented
+  QLGC     absent from bars, not documented
+  RAI      absent from bars, not documented
+  RDC      absent from bars, not documented
   RE       absent from bars, not documented
+  RHT      absent from bars, not documented
+  RRD      absent from bars, not documented
+  RSHCQ    absent from bars, not documented
   RTN      absent from bars, not documented
+  SBNY     absent from bars, not documented
+  SCG      absent from bars, not documented
+  SE       absent from bars, not documented
   SEE      absent from bars, not documented
+  SHLD     absent from bars, not documented
+  SIAL     absent from bars, not documented
   SIVB     absent from bars, not documented
+  SNI      absent from bars, not documented
+  SPLS     absent from bars, not documented
+  SRCL     absent from bars, not documented
+  STJ      absent from bars, not documented
+  SUNEQ    absent from bars, not documented
+  SVU      absent from bars, not documented
+  SWN      absent from bars, not documented
+  SWY      absent from bars, not documented
+  SYMC     absent from bars, not documented
+  TEG      absent from bars, not documented
+  TGNA     absent from bars, not documented
+  TGT      absent from bars, not documented
+  TIE      absent from bars, not documented
   TIF      absent from bars, not documented
+  TLAB     absent from bars, not documented
+  TMK      absent from bars, not documented
+  TSS      absent from bars, not documented
+  TWC      absent from bars, not documented
   TWTR     absent from bars, not documented
+  TWX      absent from bars, not documented
   UTX      absent from bars, not documented
   VAR      absent from bars, not documented
+  VIAB     absent from bars, not documented
   VIAC     absent from bars, not documented
   WBA      absent from bars, not documented
   WCG      absent from bars, not documented
+  WFM      absent from bars, not documented
+  WIN      absent from bars, not documented
   WLTW     absent from bars, not documented
+  WPX      absent from bars, not documented
   WRK      absent from bars, not documented
+  WYND     absent from bars, not documented
+  X        absent from bars, not documented
   XEC      absent from bars, not documented
+  XL       absent from bars, not documented
   XLNX     absent from bars, not documented
 
 == DOCUMENTED UNAVAILABLE (absent but explained) ==
-  (none)
+  ADT      tiingo_no_prices
+  APC      tiingo_no_prices
+  BBBY     tiingo_no_prices
+  BEAM     tiingo_no_prices
+  BK       tiingo_no_prices
+  LB       tiingo_no_prices
+  LIFE     tiingo_no_prices
+  MMI      tiingo_no_prices
+  NE       tiingo_no_prices
+  S        tiingo_no_prices
+  STI      tiingo_no_prices
+  TE       tiingo_no_prices
 
-== THROTTLED (Yahoo rate-limit; re-run download_equity_data.py) ==
-  BK       throttled
-  CMA      throttled
-  COIN     throttled
-  PLTR     throttled
-
-Totals: broken=2 missing_window=69 documented_unavailable=0 throttled=4
+Totals: broken=0 missing_window=210 documented_unavailable=12
