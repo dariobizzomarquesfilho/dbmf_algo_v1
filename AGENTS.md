@@ -82,7 +82,7 @@ lean backtest            # or: lean backtest --config lean.json
 
 ## PIT / No Look-Ahead Rules
 
-- Fundamentals: `fundamentals_history.json` = TTM per quarter from SEC 10-Q via `edgar` (edgartools). Access via `fundamental_as_of(ticker, as_of)` — latest quarter at-or-before date. If no quarter exists, skip ticker (do not fall back to static snapshot or future quarter).
+- Fundamentals: `fundamentals_history.json` = TTM per quarter from SEC 10-Q via `edgar` (edgartools), keyed by **filing_date** (SEC `filing_date`, not fiscal period end). Access via `fundamental_as_of(ticker, as_of)` — latest filing with `filing_date <= as_of` (inclusive). If no filing exists at-or-before date, skip ticker (do not fall back to static snapshot or future quarter). Using period end as PIT key would be ~30-45d look-ahead bias; `period`/`report_date` is retained only for audit.
 - ERP: `resolve_erp_as_of(erp_history_cache, histimpl_cache, as_of)` — latest at-or-before date, spreadsheet PIT preferred, annual histimpl fallback. No current-date static file.
 - Risk-free rate: `resolve_risk_free_rate(as_of)` from `^TNX` embedded bars, PIT only.
 - S&P 500: `intervals_active` guard — never subscribe a ticker before its index-add date.

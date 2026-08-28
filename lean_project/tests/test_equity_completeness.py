@@ -85,10 +85,21 @@ def test_last_trading_day_weekend():
     assert last_trading_day(date(2020, 9, 21)) == date(2020, 9, 21)  # Mon
 
 
+def test_last_trading_day_good_friday():
+    # NYSE-aware: Good Friday 2024-03-29 is closed, so last trading day
+    # before weekend 2024-03-31 is Thu 2024-03-28 (not Fri).
+    assert last_trading_day(date(2024, 3, 31)) == date(2024, 3, 28)
+    assert last_trading_day(date(2024, 3, 29)) == date(2024, 3, 28)
+    assert last_trading_day(date(2024, 3, 30)) == date(2024, 3, 28)
+
+
 def test_spinoff_parent_exits_in_window():
     assert spinoff_parent_exits("2023-01-03") == {"GE"}     # before GEHC 2023-01-04
     assert spinoff_parent_exits("2024-04-01") == {"GE"}     # before GEV 2024-04-02
-    assert spinoff_parent_exits("2024-03-29") == {"MMM"}    # before SOLV 2024-04-01
+    # SOLV ex 2024-04-01 Mon -> exit = last NYSE day before = Thu 2024-03-28
+    # (Fri 2024-03-29 Good Friday is NYSE closed, so shifted from old 03-29)
+    assert spinoff_parent_exits("2024-03-28") == {"MMM"}    # before SOLV 2024-04-01 (NYSE-aware)
+    assert spinoff_parent_exits("2024-03-29") == set()      # Good Friday — no exit (shifted to 03-28)
     assert spinoff_parent_exits("2020-04-02") == {"UTX"}    # before OTIS/CARR 2020-04-03
     assert spinoff_parent_exits("2023-08-24") == {"JNJ"}    # before KVUE 2023-08-25
     assert spinoff_parent_exits("2023-01-05") == set()      # not an exit day

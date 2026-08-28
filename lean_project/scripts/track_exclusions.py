@@ -55,6 +55,13 @@ def main() -> int:
     )
 
     unavailable_path = _LEAN_PROJECT / "data" / "equity_unavailable.json"
+    fundamentals_path = _LEAN_PROJECT / "data" / "fundamentals_history.json"
+    fundamentals = None
+    if fundamentals_path.exists():
+        try:
+            fundamentals = json.load(open(fundamentals_path, encoding="utf-8"))
+        except Exception:
+            fundamentals = None
 
     info = collect_exclusions(
         bars,
@@ -62,6 +69,7 @@ def main() -> int:
         config.BACKTEST_START,
         config.BACKTEST_END,
         unavailable_path=str(unavailable_path),
+        fundamentals=fundamentals,
     )
 
     out = write_reports(
@@ -72,10 +80,13 @@ def main() -> int:
         bars_path.name,
     )
     print(f"Wrote exclusion report: {out}")
-    print(
+    msg = (
         f"  broken={len(info['broken'])} missing_window={len(info['missing_window'])} "
         f"documented={len(info['documented_unavailable'])}"
     )
+    if "window_members_without_fundamentals" in info:
+        msg += f" window_members_without_fundamentals={len(info['window_members_without_fundamentals'])}"
+    print(msg)
     return 0
 
 

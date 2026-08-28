@@ -268,45 +268,49 @@ def get_parent_equity(tenq, fin):
 
 
 def compute_pit_eps_growth(sorted_pairs: list, years: int = 2) -> dict:
-    """Compute point-in-time EPS CAGR for each period.
+    """Compute point-in-time EPS CAGR for each filing.
 
-    ``sorted_pairs`` must be a list of ``(period_str, ttm_eps)`` sorted
-    ascending by period.  For each period ``P`` the CAGR is computed
-    against the latest entry with ``period <= P - years`` — strictly
-    past, no look-ahead.  Negative or missing values return ``None``.
-    No floor or cap is applied.
+    ``sorted_pairs`` must be a list of ``(filed_str, ttm_eps)`` sorted
+    ascending by filing_date (PIT). For each filing ``F`` the CAGR is
+    computed against the latest entry with ``filed <= F - years`` —
+    strictly past, no look-ahead. Negative or missing values return
+    ``None``. No floor or cap is applied. When keys are filing dates,
+    the CAGR denominator uses the actual calendar delta between the two
+    filing dates (not the fixed ``years``), so gaps and filing lags are
+    handled correctly. ``period`` is retained in the output for audit
+    but not used for growth timing.
     """
-    periods = [p for p, _ in sorted_pairs]
+    fileds = [p for p, _ in sorted_pairs]
     eps_vals = [e for _, e in sorted_pairs]
     result = {}
 
-    for i, (period, eps_now) in enumerate(sorted_pairs):
+    for i, (filed, eps_now) in enumerate(sorted_pairs):
         if eps_now is None or eps_now <= 0:
-            result[period] = None
+            result[filed] = None
             continue
-        # Find latest ref with period <= P - years (strictly past)
-        cutoff = datetime.strptime(period, "%Y-%m-%d").date() - timedelta(days=365 * years)
+        # Find latest ref with filed <= F - years (strictly past, PIT)
+        cutoff = datetime.strptime(filed, "%Y-%m-%d").date() - timedelta(days=365 * years)
         ref_idx = None
         for j in range(i - 1, -1, -1):
-            if datetime.strptime(periods[j], "%Y-%m-%d").date() <= cutoff:
+            if datetime.strptime(fileds[j], "%Y-%m-%d").date() <= cutoff:
                 ref_idx = j
                 break
         if ref_idx is None:
-            result[period] = None
+            result[filed] = None
             continue
         eps_ref = eps_vals[ref_idx]
         if eps_ref is None or eps_ref <= 0:
-            result[period] = None
+            result[filed] = None
             continue
-        # Annualize over the ACTUAL calendar delta between the two period dates
+        # Annualize over the ACTUAL calendar delta between the two filing dates
         # (not the fixed `years` cutoff), so gaps in the series and leap-year
         # day-counts are handled correctly. `ref_idx` is strictly before `i`,
         # so the delta is always positive.
-        d_now = datetime.strptime(period, "%Y-%m-%d").date()
-        d_ref = datetime.strptime(periods[ref_idx], "%Y-%m-%d").date()
+        d_now = datetime.strptime(filed, "%Y-%m-%d").date()
+        d_ref = datetime.strptime(fileds[ref_idx], "%Y-%m-%d").date()
         actual_years = (d_now - d_ref).days / 365.25
         cagr = (eps_now / eps_ref) ** (1.0 / actual_years) - 1
-        result[period] = cagr
+        result[filed] = cagr
 
     return result
 
@@ -334,6 +338,25 @@ def _safe_period_of_report(filing) -> Optional[str]:
     return str(p)
 
 
+def _filing_date_str(filing) -> Optional[str]:
+    """Return filing_date as ISO YYYY-MM-DD string (PIT availability date).
+
+    ``filing.filing_date`` is a cheap parquet column (no network), unlike
+    ``period_of_report`` which may require SGML. It is the SEC acceptance
+    date when the report becomes public — the correct PIT key. Normalizes
+    date/datetime/string to ISO string for clean comparison.
+    """
+    try:
+        fd = filing.filing_date
+    except Exception:
+        return None
+    if fd is None:
+        return None
+    if isinstance(fd, (datetime, date)):
+        return fd.isoformat()[:10]
+    return str(fd)[:10]
+
+
 def _clean(value):
     """Normalize a numeric XBRL fact.
 
@@ -359,16 +382,22 @@ def get_quarterly_history(
 ) -> dict:
     """Get quarterly PIT financial history from 10-Q filings.
 
-    Uses the filings table's ``report_date`` (period of report) — a cheap,
-    no-network column — instead of the per-filing ``period_of_report``
-    property, which would trigger a separate SGML download for every
-    filing.  Restricts the expensive ``obj()`` XBRL parse to quarters
-    whose period is within the backtest window plus a 2-year growth
+    PIT key is ``filing_date`` (SEC acceptance date, cheap parquet column),
+    NOT ``report_date``/``period_of_report`` (fiscal period end). Using the
+    fiscal date as the PIT key introduces ~30-45 days of look-ahead bias
+    because reports are only public after filing. ``filing_date`` is the
+    correct availability date; ``report_date`` is kept as ``period`` for
+    audit/TAM but never used for PIT joins.
+
+    Restricts the expensive ``obj()`` XBRL parse to filings whose
+    ``filing_date`` is within the backtest window plus a 2-year growth
     look-back, so the run scales to the full S&P 500.
 
-    De-duplicates by period before summing TTM (amendment guard) and sums
-    the trailing *available* quarters positionally (current + previous 3),
-    so a missing quarter self-heals via the next filing's cumulative value.
+    De-duplicates by period (keeping the latest filing for that period)
+    before summing TTM (amendment guard) and sums the trailing *available*
+    filings positionally (current + previous 3), so a missing quarter
+    self-heals via the next filing's cumulative value. quarters are
+    ordered by ``filing_date`` (PIT order), not period end.
     """
     try:
         filings = company.get_filings(form="10-Q", amendments=False)
@@ -378,28 +407,33 @@ def get_quarterly_history(
         return {}
 
     backtest_start_date = datetime.strptime(backtest_start, "%Y-%m-%d").date()
-    # Fetch only periods that can contribute to output or the 2y g_eps look-back.
+    # Fetch only filings that can contribute to output or the 2y g_eps look-back.
+    # PIT cutoff is on filing_date, not period, so a filing whose period is
+    # just before the cutoff but filed after it is correctly retained for TTM/growth.
     cutoff_date = backtest_start_date - timedelta(days=365 * 2)
     cutoff_str = cutoff_date.isoformat()
 
-    # Collect (period, filing) cheaply; report_date is the period of report.
+    # Collect (period, filing_date, filing) cheaply; both are parquet columns (no network).
+    # filing_date is the PIT availability date; report_date is the fiscal period end.
     candidates = []
     for f in filings:
         period = f.report_date or _safe_period_of_report(f)
-        if not period:
+        filed = _filing_date_str(f)
+        if not period or not filed:
             continue
-        if period < cutoff_str:
+        # PIT filter: filing must be on/after cutoff to contribute to TTM/growth window.
+        if filed < cutoff_str:
             continue
-        candidates.append((period, f))
+        candidates.append((period, filed, f))
 
     if not candidates:
         return {}
 
     # Parse financials only for in-window candidates. De-duplicate by period
-    # (keep the last occurrence) so an amendment double-count cannot happen.
+    # (keep the latest filing for that period) so an amendment double-count cannot happen.
     by_period: dict = {}
     parse_failures = 0
-    for period, f in candidates:
+    for period, filed, f in candidates:
         try:
             tenq = f.obj()
             fin = tenq.financials
@@ -414,8 +448,13 @@ def get_quarterly_history(
             # leave ``shares`` None: the quarter's book_value/eps become None
             # and the screen skips it instead of silently using look-ahead data.
             shares = shares_diluted or shares_basic
+            # Amendment guard: keep the filing with the latest filing_date for this period.
+            existing = by_period.get(period)
+            if existing is not None and existing.get("filed", "") >= filed:
+                continue
             by_period[period] = {
                 "period": period,
+                "filed": filed,
                 "revenue": rev,
                 "net_income": ni,
                 "equity": eq,
@@ -450,12 +489,14 @@ def get_quarterly_history(
     if not by_period:
         return {}
 
-    quarters = [by_period[k] for k in sorted(by_period.keys())]
+    # PIT order: sort by filing_date, not period end — the report is only
+    # available after filing, so TTM windows must follow filing chronology.
+    quarters = sorted(by_period.values(), key=lambda x: x["filed"])
 
-    all_quarters = []  # (period_str, ttm_eps) for growth computation
+    all_quarters = []  # (filed_str, ttm_eps) for growth computation (PIT)
     hist_dict = {}
     for i, current in enumerate(quarters):
-        # TTM = sum of current and previous 3 quarters (positional, available).
+        # TTM = sum of current and previous 3 filings (positional, available).
         window = quarters[max(0, i - 3): i + 1]
 
         rev_vals = [q["revenue"] for q in window if q["revenue"] is not None]
@@ -474,13 +515,19 @@ def get_quarterly_history(
         ttm_eps = ni_ttm / shares if shares and shares > 0 else None
 
         period_str = str(current["period"])
-        all_quarters.append((period_str, ttm_eps))
+        filed_str = str(current["filed"])
+        all_quarters.append((filed_str, ttm_eps))
 
-        # Only include quarters >= backtest_start in output
-        if datetime.strptime(period_str, "%Y-%m-%d").date() < backtest_start_date:
+        # Only include filings with filing_date >= backtest_start in output.
+        # A filing for period 2018-12-31 filed 2019-02-01 is NOT available at
+        # 2019-01-01, so it must not be keyed by period. Using filing_date
+        # as the canonical key guarantees no look-ahead in fundamental_as_of.
+        if datetime.strptime(filed_str, "%Y-%m-%d").date() < backtest_start_date:
             continue
 
-        hist_dict[period_str] = {
+        hist_dict[filed_str] = {
+            "period": period_str,
+            "filed": filed_str,
             "sector": sector,
             "industry": industry,
             "sic": sic,
@@ -492,11 +539,11 @@ def get_quarterly_history(
             "net_income_ttm": round(ni_ttm) if ni_ttm is not None else None,
         }
 
-    # Compute PIT EPS growth for every output quarter
+    # Compute PIT EPS growth for every output filing (keyed by filing_date)
     g_eps_map = compute_pit_eps_growth(all_quarters, years=2)
-    for period_str, g_eps in g_eps_map.items():
-        if period_str in hist_dict:
-            hist_dict[period_str]["g_eps"] = round(g_eps, 6) if g_eps is not None else None
+    for filed_str, g_eps in g_eps_map.items():
+        if filed_str in hist_dict:
+            hist_dict[filed_str]["g_eps"] = round(g_eps, 6) if g_eps is not None else None
 
     return hist_dict
 

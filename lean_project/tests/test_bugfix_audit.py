@@ -25,17 +25,17 @@ def test_resolve_rf_pit_bar_used_once():
 
 
 def test_resolve_rf_no_pit_bar_uses_default_not_future():
-    """No bar <= as_of: must NOT use a future close (that is look-ahead); default."""
+    """No bar <= as_of: must NOT use a future close (that is look-ahead); returns None (no invented yield)."""
     from universe.pit_data import resolve_risk_free_rate
 
     tn_bars = {"2025-01-01": {"close": 4.5}}
-    assert resolve_risk_free_rate(tn_bars, "2024-06-01") == 0.042
+    assert resolve_risk_free_rate(tn_bars, "2024-06-01") is None
 
 
 def test_resolve_rf_empty_bars_default():
     from universe.pit_data import resolve_risk_free_rate
 
-    assert resolve_risk_free_rate({}, "2024-06-01") == 0.042
+    assert resolve_risk_free_rate({}, "2024-06-01") is None
 
 
 # ---------------------------------------------------------------------------

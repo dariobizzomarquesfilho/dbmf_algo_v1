@@ -21,6 +21,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Iterable, Set, Tuple
 
+from data.nys_calendar import is_nyse_open
+
 # (ex_date, added_ticker, parent_ticker)
 SPINOFFS: list[Tuple[str, str, str]] = [
     ("2007-10-01", "TDC", "NCR"),
@@ -68,17 +70,14 @@ def _parse(d: str) -> date:
 
 
 def last_trading_day(d: date) -> date:
-    """Return the last business day (weekday) <= ``d``.
+    """Return the last NYSE trading day <= ``d``.
 
-    Corporate-action exit timing uses a simple business-day (Mon–Fri)
-    convention rather than the exchange trading calendar: spin-off / index
-    removal exits are scheduled against the prior business day, and the
-    authoritative tests expect e.g. the exit for a Monday 2024-04-01 spin-off
-    to fall on Friday 2024-03-29 (Good Friday is treated as a business day for
-    this scheduling purpose). Membership-end exits reuse the same convention.
+    Uses the NYSE calendar (``data.nys_calendar.is_nyse_open``) so holidays
+    such as Good Friday are treated as non-trading days. Corporate-action
+    exit timing (spinoff / index removal) is therefore NYSE-aware.
     """
     cur = d
-    while cur.weekday() >= 5:
+    while not is_nyse_open(cur):
         cur -= timedelta(days=1)
     return cur
 

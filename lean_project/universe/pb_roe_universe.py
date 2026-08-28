@@ -211,9 +211,15 @@ def run_fine_selection(
 
     as_of = algorithm.Time.strftime("%Y-%m-%d")
 
-    # PIT risk-free rate: 10-yr yield as-of the backtest date
+    # PIT risk-free rate: 10-yr yield as-of the backtest date (PIT, no static fallback)
     tn_bars = bars_cache.get("^TNX", {})
     rf = resolve_risk_free_rate(tn_bars, as_of)
+    if rf is None:
+        algorithm.Log(
+            f"ERROR: No PIT risk-free rate available as_of={as_of} "
+            f"(no ^TNX bar <= as_of — refusing invented 0.042). Skipping screen for this date."
+        )
+        return []
 
     # PIT ERP is the sole, authoritative source of truth. There is NO fallback
     # to a current/latest snapshot (that would be look-ahead bias). If neither

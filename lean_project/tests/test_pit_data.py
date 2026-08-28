@@ -1,7 +1,19 @@
-from universe.pit_data import fundamental_as_of, latest_price_as_of, rolling_beta
+from universe.pit_data import fundamental_as_of, rolling_beta
 
 
 HIST = {
+    # PIT history keyed by filing_date (SEC availability), with period for audit.
+    # Q1 period 2023-03-31 filed 2023-05-15, Q2 period 2023-06-30 filed 2023-08-14, etc.
+    # Lag ~45 days; using period as key would be look-ahead.
+    "AAPL": {
+        "2023-05-15": {"period": "2023-03-31", "filed": "2023-05-15", "book_value": 3.92, "roe": 1.50, "eps": 6.10},
+        "2023-08-14": {"period": "2023-06-30", "filed": "2023-08-14", "book_value": 4.01, "roe": 1.61, "eps": 6.32},
+        "2023-11-03": {"period": "2023-09-30", "filed": "2023-11-03", "book_value": 4.20, "roe": 1.70, "eps": 6.55},
+    }
+}
+
+# Legacy layout (period-keyed, no filed field) — kept for backward compat.
+HIST_LEGACY = {
     "AAPL": {
         "2023-03-31": {"book_value": 3.92, "roe": 1.50, "eps": 6.10},
         "2023-06-30": {"book_value": 4.01, "roe": 1.61, "eps": 6.32},
@@ -12,12 +24,47 @@ HIST = {
 
 def test_fundamental_as_of_picks_latest_quarter_at_or_before_date():
     snap = fundamental_as_of(HIST, "AAPL", "2023-08-15")
-    assert snap["book_value"] == 4.01  # June value used before Sept report
+    assert snap["book_value"] == 4.01  # Aug filing used before Nov filing
 
 
 def test_fundamental_as_of_exact_quarter_date_inclusive():
-    snap = fundamental_as_of(HIST, "AAPL", "2023-09-30")
+    snap = fundamental_as_of(HIST, "AAPL", "2023-11-03")
     assert snap["book_value"] == 4.20
+
+
+def test_fundamental_as_of_respects_filing_date_not_period():
+    """Look-ahead guard: period 2023-03-31 ended but not yet filed at 2023-04-15.
+
+    Old period-keyed code would return the Q1 snapshot at 2023-04-15 (look-ahead).
+    PIT with filing_date must return None until filing_date 2023-05-15.
+    """
+    assert fundamental_as_of(HIST, "AAPL", "2023-04-15") is None
+    snap = fundamental_as_of(HIST, "AAPL", "2023-05-15")
+    assert snap["book_value"] == 3.92
+
+
+def test_fundamental_as_of_legacy_period_keyed_is_rejected():
+    """Legacy period-keyed data (no filed/filing_date) is now rejected — no look-ahead fallback.
+
+    HIST_LEGACY outer keys are fiscal period ends; without a filing_date they
+    would be ~45d early. After L4 fix, fundamental_as_of must return None
+    (run download_edgartools_data.py to regenerate with filing-keyed data).
+    """
+    assert fundamental_as_of(HIST_LEGACY, "AAPL", "2023-04-15") is None
+    assert fundamental_as_of(HIST_LEGACY, "AAPL", "2023-11-03") is None
+
+
+def test_fundamental_as_of_uses_filed_field_when_key_differs():
+    """Robustness: outer key may differ from inner filed field; PIT uses filed."""
+    hist_mixed = {
+        "AAPL": {
+            # Key is filing date, but inner filed is authoritative
+            "2023-05-15": {"period": "2023-03-31", "filed": "2023-05-15", "book_value": 3.92, "roe": 1.50, "eps": 6.10},
+        }
+    }
+    # Before filing, None
+    assert fundamental_as_of(hist_mixed, "AAPL", "2023-05-14") is None
+    assert fundamental_as_of(hist_mixed, "AAPL", "2023-05-15")["book_value"] == 3.92
 
 
 def test_fundamental_as_of_none_before_first_quarter():
@@ -26,17 +73,6 @@ def test_fundamental_as_of_none_before_first_quarter():
 
 def test_fundamental_as_of_missing_ticker_none():
     assert fundamental_as_of(HIST, "MSFT", "2023-06-30") is None
-
-
-def test_latest_price_as_of_uses_bar_at_or_before_date():
-    bars = {
-        "2023-01-03": {"close": 100.0},
-        "2023-02-01": {"close": 110.0},
-        "2023-02-20": {"close": 120.0},
-    }
-    assert latest_price_as_of(bars, "2023-02-10") == 110.0
-    assert latest_price_as_of(bars, "2023-02-20") == 120.0
-    assert latest_price_as_of(bars, "2022-01-01") is None
 
 
 def test_rolling_beta_returns_beta_alpha():

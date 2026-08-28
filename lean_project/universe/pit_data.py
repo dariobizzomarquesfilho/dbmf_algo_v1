@@ -3,6 +3,13 @@
 Pure module (no Lean/AlgorithmImports import) so it is unit-testable
 with plain pytest and reusable at buy-scan time inside Lean.
 ISO YYYY-MM-DD strings compare correctly with ``<=``.
+
+PIT fundamentals: ``fundamentals_history.json`` is keyed by ``filing_date``
+(SEC acceptance date, when the report becomes public), NOT fiscal
+``period``/``report_date``. Using the fiscal date would be ~30-45 days
+look-ahead bias. ``fundamental_as_of`` picks the latest snapshot with
+``filing_date <= as_of`` (inclusive). Snapshots retain ``period`` for
+audit but it is never used for PIT joins.
 """
 
 from __future__ import annotations
@@ -13,18 +20,38 @@ import numpy as np
 
 
 def fundamental_as_of(hist: dict, ticker: str, date_str: str) -> Optional[dict]:
-    """Latest quarter snapshot with quarter_end <= date_str (inclusive).
+    """Latest PIT filing snapshot with filing_date <= date_str (inclusive).
 
-    A quarter reported ON the backtest date is considered available.
+    PIT key is ``filing_date`` (SEC ``filing_date``), not fiscal period end.
+    A filing made ON the backtest date is considered available that day.
+    Legacy period-keyed entries (outer key is fiscal period, no ``filed``/
+    ``filing_date`` field) are **skipped** — they would introduce ~30-45d
+    look-ahead bias. Run ``download_edgartools_data.py`` to regenerate history
+    with filing-keyed data; this function returns ``None`` for legacy-only
+    tickers until re-downloaded.
     """
-    qs = [q for q in hist.get(ticker, {}) if q <= date_str]
-    return hist[ticker][max(qs)] if qs else None
-
-
-def latest_price_as_of(bars: dict, date_str: str) -> Optional[float]:
-    """Latest bar close with bar date <= date_str (inclusive). Returns None if no bar yet."""
-    ds = [d for d in bars if d <= date_str]
-    return float(bars[max(ds)]["close"]) if ds else None
+    ticker_hist = hist.get(ticker, {})
+    if not ticker_hist:
+        return None
+    # PIT date is filed/filing_date only; legacy period-keyed entries are rejected.
+    candidates = []
+    for key, snap in ticker_hist.items():
+        pit_date = None
+        if isinstance(snap, dict):
+            pit_date = snap.get("filed") or snap.get("filing_date")
+        if not pit_date:
+            # Legacy period-keyed data is rejected; run download_edgartools_data.py to regenerate.
+            continue
+        # Normalize to ISO string (already is, but be defensive)
+        pit_date = str(pit_date)[:10]
+        if pit_date <= date_str:
+            candidates.append((pit_date, key))
+    if not candidates:
+        return None
+    # Pick latest PIT date; tie-break by key (deterministic)
+    candidates.sort()
+    _, best_key = candidates[-1]
+    return ticker_hist[best_key]
 
 
 def rolling_beta(
@@ -152,14 +179,14 @@ def resolve_erp_as_of(
     return None
 
 
-def resolve_risk_free_rate(tn_bars: dict, as_of: str) -> float:
+def resolve_risk_free_rate(tn_bars: dict, as_of: str) -> Optional[float]:
     """Point-in-time risk-free rate (decimal) from ``^TNX`` bars as-of ``as_of``.
 
     Returns the latest bar close that is ``<= as_of``, divided by 100 exactly
-    once (Yahoo quotes the 10-yr yield index in yield*10). When no bar exists
-    at/before ``as_of`` the dataset is incomplete for that date; we do NOT reach
-    into future bars (that would be look-ahead) and fall back to the configured
-    default instead.
+    once (Yahoo quotes the 10-yr yield index in yield*10). PIT: returns None
+    when no bar exists at/before ``as_of`` (no look-ahead, no invented yield).
+    Callers must check for None and skip the screen/log an error. Finite and
+    positive checks are applied; invalid closes also yield None.
     """
     if tn_bars:
         ds = [d for d in tn_bars if d <= as_of]
@@ -167,9 +194,10 @@ def resolve_risk_free_rate(tn_bars: dict, as_of: str) -> float:
             try:
                 close = float(tn_bars[max(ds)]["close"])
             except (TypeError, ValueError):
-                return 0.042
+                return None
             # Guard NaN/inf: float('nan') > 0 is False but explicit is clearer
             import math
             if math.isfinite(close) and close > 0:
                 return close / 100.0
-    return 0.042
+            return None
+    return None

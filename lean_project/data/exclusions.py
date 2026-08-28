@@ -42,16 +42,49 @@ def load_unavailable(path: Optional[str]) -> dict:
         return {}
 
 
+def collect_fundamentals_gap(
+    membership: dict,
+    fundamentals: dict,
+    win_start: str,
+    win_end: str,
+) -> dict[str, str]:
+    """Compute S1 survivorship gap: window members without fundamentals.
+
+    Simple set subtraction: ``window_members - fundamentals_keys``. No decoupling;
+    bars and fundamentals are independent sources with different coverage.
+
+    * ``window_members``: tickers with at least one membership interval
+      overlapping ``[win_start, win_end]`` (excludes ^TNX/^GSPC).
+    * ``fundamentals``: dict loaded from fundamentals_history.json (keys are tickers).
+
+    Returns ``{ticker: reason}`` for each window member absent from fundamentals.
+    """
+    fundamentals_keys = set(fundamentals.keys()) if fundamentals else set()
+    gap: dict[str, str] = {}
+    for t, ivs in membership.items():
+        if t in ("^TNX", "^GSPC"):
+            continue
+        if not any(s <= win_end and (e is None or e >= win_start) for s, e in ivs):
+            continue
+        if t not in fundamentals_keys:
+            gap[t] = "window member absent from fundamentals_history (no SEC XBRL 2009+ / edgar match)"
+    return gap
+
+
 def collect_exclusions(
     bars: dict,
     membership: dict,
     win_start: str,
     win_end: str,
     unavailable_path: Optional[str] = None,
+    fundamentals: Optional[dict] = None,
 ) -> dict:
     """Return categorized exclusions across the whole universe.
 
     ``bars`` is the equity_bars dict, ``membership`` the S&P 500 interval map.
+    If ``fundamentals`` is provided (fundamentals_history dict), also computes
+    ``window_members_without_fundamentals`` via simple set subtraction
+    (``window_members - fundamentals_keys``) for S1 survivorship documentation.
     """
     unavailable = load_unavailable(unavailable_path)
 
@@ -74,11 +107,16 @@ def collect_exclusions(
             else:
                 missing_window[t] = "absent from bars, not documented"
 
-    return {
+    result: dict = {
         "broken": broken,
         "missing_window": missing_window,
         "documented_unavailable": documented,
     }
+    if fundamentals is not None:
+        result["window_members_without_fundamentals"] = collect_fundamentals_gap(
+            membership, fundamentals, win_start, win_end
+        )
+    return result
 
 
 def render_text_report(
@@ -129,6 +167,20 @@ def render_text_report(
         info["documented_unavailable"],
         lambda t: info["documented_unavailable"][t],
     )
+    # S1 survivorship gap: window members vs fundamentals (bars and fundamentals are decoupled sources)
+    if "window_members_without_fundamentals" in info:
+        _sec(
+            "WINDOW MEMBERS WITHOUT FUNDAMENTALS (S1 survivorship/coverage gap: window_members - fundamentals_keys)",
+            info["window_members_without_fundamentals"],
+            lambda t: info["window_members_without_fundamentals"][t],
+        )
+        lines.append(
+            "NOTE: window_members_without_fundamentals is a COVERAGE gap (SEC XBRL 2009+ vs "
+            "S&P 500 membership). Bars and fundamentals are independent sources; a ticker "
+            "absent from fundamentals is simply not tradeable by the PIT screen (no look-ahead, "
+            "no decoupling). See docs/data-limitations.md."
+        )
+        lines.append("")
 
     lines.append(
         "Totals: broken={broken} missing_window={missing} "
@@ -138,6 +190,12 @@ def render_text_report(
             doc=len(info["documented_unavailable"]),
         )
     )
+    if "window_members_without_fundamentals" in info:
+        lines.append(
+            "  window_members_without_fundamentals={gap}".format(
+                gap=len(info["window_members_without_fundamentals"])
+            )
+        )
     return "\n".join(lines)
 
 
