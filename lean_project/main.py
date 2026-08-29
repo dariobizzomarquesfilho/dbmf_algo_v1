@@ -28,7 +28,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
 
     def Initialize(self):
         self.SetCash(100_000)
-        self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Margin)
+        self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Cash)
         self.UniverseSettings.Resolution = Resolution.Daily
 
         self.max_positions = 10
