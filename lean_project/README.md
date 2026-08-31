@@ -30,8 +30,8 @@ PbRoeAtrAlgorithm (main.py)
     │     └── DailyRebalance()
     │           ├── _ensure_prices()     → SetMarketPrice from embedded bars
     │           ├── _check_stops()       → ATR trailing stop exit
-    │           ├── run_fine_selection() → P/B vs ROE Gordon-growth rescreen
-    │           └── SetHoldings / Liquidate / membership + spinoff exits
+    │           ├── run_fine_selection() → P/B vs ROE Gordon-growth rescreen (top 20 gap>0)
+    │           └── MarketOrder (Van Tharp 1% NAV risk, 10% cap, whole shares) / Liquidate / membership + spinoff exits
 ```
 
 ## Architecture
@@ -82,10 +82,10 @@ The backtest window comes from `config/.env` (`BACKTEST_START`/`BACKTEST_END`, e
 
 ### `main.py`
 The algorithm. Key methods:
-- **`Initialize()`** — Loads embedded data, bootstraps CSV.zip files, registers tickers, sets up daily rebalance via `OnData`.
+- **`Initialize()`** — Loads embedded data, bootstraps CSV.zip files, registers tickers, sets up daily rebalance via `OnData`. Position sizing is Van Tharp ATR-risk: each new position risks 1% of NAV (`entry - 3×ATR` stop), capped at 10% of NAV, whole shares only. No `max_positions` cap — capacity is risk/cash-constrained. `Cash` brokerage (no margin).
 - **`_ensure_prices()`** — Explicitly sets `Security.Price` from embedded bars via `SetMarketPrice()`. This fixes a Lean bug where `Security.Price` returns 0.00 at scheduled event times.
 - **`_check_stops()`** — Checks ATR trailing stops using embedded bar close prices (not `Security.Price` which can be stale).
-- **`DailyRebalance()`** — Orchestrates the daily cycle: ensure prices → check stops → rescreen → rebalance.
+- **`DailyRebalance()`** — Orchestrates the daily cycle: ensure prices → corporate-action exits → check stops → PIT rescreen (`run_fine_selection` top 20) → `MarketOrder` with Van Tharp sizing + remaining-cash gate. Screening runs every day (no slot-free guard).
 
 ### `data/bootstrap_data.py`
 Writes embedded equity bars as CSV.zip files into Lean's data folder. At runtime, it:

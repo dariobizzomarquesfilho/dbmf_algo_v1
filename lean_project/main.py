@@ -7,11 +7,13 @@ Prices are injected into securities via Security.SetMarketPrice().
 
 Filters out financials by sector keyword matching.
 Exits positions when ATR trailing stop is breached.
-All positions equal-weight (1/max_positions).
+Position sizing uses Van Tharp ATR-risk: each position risks 1% of NAV
+(entry - 3*ATR stop), capped at 10% of NAV at entry (whole shares).
 """
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -23,6 +25,26 @@ from indicators.atr_trailing_stop import compute_atr_trailing_stop
 from data.equity_bars import load_equity_bars
 
 
+def _van_tharp_shares(
+    nav: float,
+    entry_price: float,
+    entry_stop: float,
+    risk_pct: float = 0.01,
+    max_pct: float = 0.10,
+) -> tuple[int, float, float, float]:
+    """Pure Van Tharp sizing — whole shares only, no fractional.
+
+    Returns (shares, capped_dollars, van_tharp_dollars, risk_per_share).
+    Caller must validate nav/entry_price/entry_stop >0 and finite before calling.
+    """
+    risk_per_share = entry_price - entry_stop
+    risk_dollars = nav * risk_pct
+    van_tharp_dollars = risk_dollars * entry_price / risk_per_share if risk_per_share > 0 else 0.0
+    capped_dollars = min(van_tharp_dollars, nav * max_pct)
+    shares = int(capped_dollars / entry_price) if entry_price > 0 else 0
+    return shares, capped_dollars, van_tharp_dollars, risk_per_share
+
+
 class PbRoeAtrAlgorithm(QCAlgorithm):
     """P/B vs ROE screening with ATR trailing stop exit."""
 
@@ -31,10 +53,15 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Cash)
         self.UniverseSettings.Resolution = Resolution.Daily
 
-        self.max_positions = 10
         self.atr_period = 15
         self.atr_multiplier = 3.0
         self.cooldown_days = 30
+        # Van Tharp ATR-risk sizing: 1% of NAV risk per position, capped at 10% NAV
+        # No max_positions cap — portfolio size is risk/cash-constrained (whole shares)
+        self.risk_per_trade_pct = 0.01
+        self.max_position_pct = 0.10
+        self.fine_selection_limit = 20
+        self.entry_prices: dict[str, float] = {}
 
         # Load backtest window from single source of truth (config/.env → embedded)
         try:
@@ -210,7 +237,11 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             for ticker in self._registered
         }
 
-        self.Log(f"PbRoeAtrAlgorithm initialized — {len(self._registered)} tickers, embedded data")
+        self.Log(
+            f"PbRoeAtrAlgorithm initialized — {len(self._registered)} tickers, embedded data "
+            f"VanTharp risk={self.risk_per_trade_pct:.2%} cap={self.max_position_pct:.0%} "
+            f"atr={self.atr_period}x{self.atr_multiplier} SMA fine_selection={self.fine_selection_limit}"
+        )
 
     # ------------------------------------------------------------------
     # Price injection from embedded bars
@@ -222,7 +253,6 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         during scheduled events. Set it explicitly from embedded bars so
         SetHoldings/Liquidate/ATR checks all use correct prices.
         """
-        import math
         date_str = self.Time.strftime("%Y-%m-%d")
         if symbol_strs is None:
             symbol_strs = self._registered
@@ -334,79 +364,153 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self._check_stops()
 
         # Expensive PIT screen (fundamental lookups + 252d beta regression)
-        # runs ONLY when a buy opportunity exists: a slot is free (initial
-        # fill or a stop just freed one). Fully-held days skip it entirely.
-        if len(self.selected_symbols) < self.max_positions:
-            # Always run a FRESH point-in-time screen over the full
-            # fundamentals universe. Caching a day-1 selection would freeze
-            # the portfolio and prevent any rotation once slots free up
-            # (root cause of the 12-order backtest: after the initial names
-            # stopped out, the same stale 10 names were retried forever, all
-            # in cooldown -> deadlock).
-            # Filter to tickers that are actually S&P 500 members on this date
-            # to prevent historical/future non-members from filling screen slots.
-            pit_tickers = [
-                t for t in self.fundamentals_history.keys()
-                if intervals_active(self.sp500_membership.get(t, []), date_str)
-            ] if self.sp500_membership else list(self.fundamentals_history.keys())
-            selected = run_fine_selection(
-                algorithm=self,
-                tickers=pit_tickers,
-                max_positions=self.max_positions,
-                bars_cache=self.bars_cache,
-                history_cache=self.fundamentals_history,
-                market_bars=self.market_bars,
-                erp_history_cache=self.erp_history_cache,
+        # No max_positions cap — portfolio size is risk/cash-constrained (whole shares).
+        # Always run a FRESH point-in-time screen over the full fundamentals universe.
+        # Filter to tickers that are actually S&P 500 members on this date
+        # to prevent historical/future non-members from filling screen slots.
+        pit_tickers = [
+            t for t in self.fundamentals_history.keys()
+            if intervals_active(self.sp500_membership.get(t, []), date_str)
+        ] if self.sp500_membership else list(self.fundamentals_history.keys())
+        selected = run_fine_selection(
+            algorithm=self,
+            tickers=pit_tickers,
+            max_positions=self.fine_selection_limit,
+            bars_cache=self.bars_cache,
+            history_cache=self.fundamentals_history,
+            market_bars=self.market_bars,
+            erp_history_cache=self.erp_history_cache,
+        )
+
+        # Spec: only ATR stops (and corporate actions above) liquidate.
+        # Empty screen (gap<=0 everywhere) means no new buys — preserve
+        # current holdings and retry next day. ERP failures already emit
+        # ERROR inside run_fine_selection; we just skip buys here.
+        if not selected:
+            self.Log(f"DailyRebalance {date_str}: empty screen (no gap>0) — no new buys, preserving {len(self.selected_symbols)} holdings")
+            return
+
+        # Never re-add a ticker that has a corporate-action exit today
+        # (rename/merger/delisting or spinoff parent) within the same cycle.
+        selected = [s for s in selected if s not in exits]
+
+        if not selected:
+            self.Log(f"DailyRebalance {date_str}: all screened tickers have corporate exits today — no new buys")
+            return
+
+        # Add new positions — risk/cash-constrained, no max_positions limit
+        today = self.Time.date()
+        added = set()
+        try:
+            remaining_cash = float(self.Portfolio.Cash)
+        except (TypeError, ValueError):
+            remaining_cash = 0.0
+        for symbol_str in selected:
+            if symbol_str in self.selected_symbols:
+                continue
+            # Cooldown: don't re-buy a symbol recently sold (e.g. stop exit)
+            sold_on = self.sell_dates.get(symbol_str)
+            if sold_on is not None:
+                sold_date = datetime.strptime(sold_on, "%Y-%m-%d").date()
+                if (today - sold_date) < timedelta(days=self.cooldown_days):
+                    continue
+            symbol = self._symbols.get(symbol_str)
+            # HasData is Lean's data-feed flag and stays False until the
+            # next bar arrives, even though we inject today's price via
+            # SetMarketPrice. Check the embedded bar directly to avoid a
+            # 1-day entry lag on index-add names.
+            has_bar = symbol is not None and self.bars_cache.get(symbol_str, {}).get(date_str) is not None
+            if symbol is None or symbol not in self.Securities or not has_bar:
+                self.Log(f"SKIP {symbol_str}: no price data yet")
+                continue
+            # Van Tharp ATR-risk sizing: position risks 1% of NAV, capped at 10% NAV (whole shares)
+            nav = float(self.Portfolio.TotalPortfolioValue)
+            if nav <= 0 or not math.isfinite(nav):
+                try:
+                    nav = float(self.Portfolio.Cash)
+                except (TypeError, ValueError):
+                    nav = 0.0
+                if nav <= 0 or not math.isfinite(nav):
+                    self.Log(f"SKIP {symbol_str}: invalid NAV nav={nav}")
+                    continue
+            # Entry price from injected Security.Price; explicit fallback with warning
+            entry_price = 0.0
+            try:
+                if symbol is not None and symbol in self.Securities:
+                    entry_price = float(self.Securities[symbol].Price)
+            except (TypeError, ValueError, AttributeError):
+                entry_price = 0.0
+            if entry_price <= 0 or not math.isfinite(entry_price):
+                bar_close = self.bars_cache.get(symbol_str, {}).get(date_str, {})
+                try:
+                    fallback_price = float(bar_close.get("close", 0) or 0)
+                except (TypeError, ValueError):
+                    fallback_price = 0.0
+                if fallback_price > 0 and math.isfinite(fallback_price):
+                    self.Log(f"FALLBACK {symbol_str}: Security.Price invalid, using embedded bar close={fallback_price:.2f}")
+                    entry_price = fallback_price
+                else:
+                    entry_price = 0.0
+            if entry_price <= 0 or not math.isfinite(entry_price):
+                self.Log(f"SKIP {symbol_str}: no entry price")
+                continue
+            # Compute entry stop from identical bars (no ratchet yet)
+            entry_stop = compute_atr_trailing_stop(
+                symbol_str,
+                self.bars_cache,
+                self.atr_period,
+                self.atr_multiplier,
+                "SMA",
+                as_of_date=date_str,
+                prev_stop=None,
             )
-
-            # Spec: only ATR stops (and corporate actions above) liquidate.
-            # Empty screen (gap<=0 everywhere) means no new buys — preserve
-            # current holdings and retry next day. ERP failures already emit
-            # ERROR inside run_fine_selection; we just skip buys here.
-            if not selected:
-                self.Log(f"DailyRebalance {date_str}: empty screen (no gap>0) — no new buys, preserving {len(self.selected_symbols)} holdings")
-                return
-
-            # Never re-add a ticker that has a corporate-action exit today
-            # (rename/merger/delisting or spinoff parent) within the same cycle.
-            selected = [s for s in selected if s not in exits]
-
-            if not selected:
-                self.Log(f"DailyRebalance {date_str}: all screened tickers have corporate exits today — no new buys")
-                return
-
-            # Add new positions
-            today = self.Time.date()
-            added = set()
-            for symbol_str in selected:
-                if symbol_str in self.selected_symbols:
+            if entry_stop is None or entry_stop <= 0 or entry_stop >= entry_price:
+                self.Log(f"SKIP {symbol_str}: no usable ATR stop entry={entry_price:.2f} stop={entry_stop}")
+                continue
+            risk_per_share = entry_price - entry_stop
+            if risk_per_share <= 0 or not math.isfinite(risk_per_share):
+                self.Log(f"SKIP {symbol_str}: invalid risk_per_share entry={entry_price:.2f} stop={entry_stop:.2f}")
+                continue
+            shares, capped_dollars, van_tharp_dollars, _ = _van_tharp_shares(
+                nav, entry_price, entry_stop, self.risk_per_trade_pct, self.max_position_pct
+            )
+            capped_by = "cap" if capped_dollars < van_tharp_dollars - 1e-9 else "risk"
+            if shares <= 0:
+                self.Log(
+                    f"SKIP {symbol_str}: VanTharp shares=0 capped=${capped_dollars:,.0f} "
+                    f"van_tharp=${van_tharp_dollars:,.0f} risk_per_share=${risk_per_share:.2f}"
+                )
+                continue
+            # Cash gate: Cash account rejects orders exceeding settled cash — track remaining_cash across loop
+            cost = shares * entry_price
+            if cost > remaining_cash:
+                max_cash_shares = int(remaining_cash / entry_price) if entry_price > 0 else 0
+                if max_cash_shares <= 0:
+                    self.Log(f"SKIP {symbol_str}: insufficient cash remaining=${remaining_cash:,.0f} need=${cost:,.0f}")
                     continue
-                # Cooldown: don't re-buy a symbol recently sold (e.g. stop exit)
-                sold_on = self.sell_dates.get(symbol_str)
-                if sold_on is not None:
-                    sold_date = datetime.strptime(sold_on, "%Y-%m-%d").date()
-                    if (today - sold_date) < timedelta(days=self.cooldown_days):
-                        continue
-                symbol = self._symbols.get(symbol_str)
-                # HasData is Lean's data-feed flag and stays False until the
-                # next bar arrives, even though we inject today's price via
-                # SetMarketPrice. Check the embedded bar directly to avoid a
-                # 1-day entry lag on index-add names.
-                has_bar = symbol is not None and self.bars_cache.get(symbol_str, {}).get(date_str) is not None
-                if symbol is None or symbol not in self.Securities or not has_bar:
-                    self.Log(f"SKIP {symbol_str}: no price data yet")
+                self.Log(f"ADJUST {symbol_str}: cash cap shares {shares}->{max_cash_shares} remaining=${remaining_cash:,.0f}")
+                shares = max_cash_shares
+                cost = shares * entry_price
+                if shares <= 0:
                     continue
-                weight = 1.0 / self.max_positions
-                self.SetHoldings(symbol, weight)
-                self.trailing_stops[symbol_str] = self._compute_stop(symbol_str)
-                self.Log(f"Added {symbol_str} @ {weight:.1%}")
-                added.add(symbol_str)
+            self.MarketOrder(symbol, shares)
+            remaining_cash -= cost
+            self.entry_prices[symbol_str] = entry_price
+            self.trailing_stops[symbol_str] = entry_stop
+            actual_risk = shares * risk_per_share / nav if nav > 0 else 0
+            actual_weight = shares * entry_price / nav if nav > 0 else 0
+            self.Log(
+                f"Added {symbol_str} shares={shares} entry={entry_price:.2f} "
+                f"stop={entry_stop:.2f} dist={risk_per_share/entry_price:.2%} "
+                f"{capped_by} risk={actual_risk:.2%} weight={actual_weight:.2%}"
+            )
+            added.add(symbol_str)
 
-            # Spec: only stops/corporate actions remove holdings — not valuation
-            # turnover. So we keep existing holdings and just add new fills.
-            # Un-fillable (no-data) picks do not pin the book because they
-            # are simply not added (added set excludes them).
-            self.selected_symbols = (self.selected_symbols | added)
+        # Spec: only stops/corporate actions remove holdings — not valuation
+        # turnover. So we keep existing holdings and just add new fills.
+        # Un-fillable (no-data) picks do not pin the book because they
+        # are simply not added (added set excludes them).
+        self.selected_symbols = (self.selected_symbols | added)
 
     # ------------------------------------------------------------------
     # ATR stops
@@ -438,6 +542,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 self.Liquidate(symbol)
                 self.selected_symbols.discard(symbol_str)
                 self.trailing_stops.pop(symbol_str, None)
+                self.entry_prices.pop(symbol_str, None)
                 self.sell_dates[symbol_str] = date_str  # start cooldown
             else:
                 self.Log(f"STOP CHECK {symbol_str} {date_str}: price={price:.2f} stop={stop:.2f} OK")
@@ -450,6 +555,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             self.Liquidate(symbol)
         self.sell_dates[symbol_str] = self.Time.strftime("%Y-%m-%d")  # start cooldown
         self.trailing_stops.pop(symbol_str, None)
+        self.entry_prices.pop(symbol_str, None)
         # Drop from the tracked set so the slot frees up and future re-screens
         # are not frozen by a phantom "full" book.
         self.selected_symbols.discard(symbol_str)
