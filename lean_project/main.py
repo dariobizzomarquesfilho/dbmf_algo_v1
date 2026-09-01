@@ -205,6 +205,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         self.selected_symbols = set()
         self.sell_dates = {}  # symbol_str -> date_str when last liquidated (cooldown)
         self.last_rebalance_date = None
+        self._pending_buys = set()  # symbols with open buy orders not yet filled/invalidated
         self._symbols = {
             ticker: Symbol.Create(ticker, SecurityType.Equity, Market.USA)
             for ticker in self._registered
@@ -311,12 +312,43 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         )
 
     # ------------------------------------------------------------------
+    # Helpers — invested count & phantom prune
+    # ------------------------------------------------------------------
+    def _invested_count(self) -> int:
+        """Count truly invested positions (Portfolio.Invested), not tracked phantoms."""
+        cnt = 0
+        for s in list(self.selected_symbols):
+            sym = self._symbols.get(s)
+            if sym is not None and sym in self.Securities and self.Portfolio[sym].Invested:
+                cnt += 1
+        return cnt
+
+    def _prune_phantoms(self) -> int:
+        """Remove symbols that are tracked but not Invested and have no open buy.
+        Heals legacy phantom lock from before the OnOrderEvent fix."""
+        removed = 0
+        for s in list(self.selected_symbols):
+            sym = self._symbols.get(s)
+            invested = sym is not None and sym in self.Securities and self.Portfolio[sym].Invested
+            if not invested and s not in self._pending_buys:
+                # Keep if it was just liquidated and in cooldown? No — cooldown is sell_dates, not selected_symbols.
+                self.selected_symbols.discard(s)
+                self.trailing_stops.pop(s, None)
+                removed += 1
+        if removed:
+            self.Log(f"Pruned {removed} phantom position(s) — no Invested, no pending buy")
+        return removed
+
+    # ------------------------------------------------------------------
     # Rebalance
     # ------------------------------------------------------------------
     def DailyRebalance(self):
         """Daily screening and rebalance using embedded data."""
         date_str = self.Time.strftime("%Y-%m-%d")
-        self.Log(f"DailyRebalance {date_str} — positions={len(self.selected_symbols)}")
+        # Heal phantoms from prior invalid orders before counting slots
+        self._prune_phantoms()
+        invested_cnt = self._invested_count()
+        self.Log(f"DailyRebalance {date_str} — positions={invested_cnt} tracked={len(self.selected_symbols)} pending={len(self._pending_buys)}")
 
         # Ensure every security has a price before deciding exits (otherwise
         # Liquidate may fill at stale 0). Corporate actions and ATR stops both
@@ -336,77 +368,192 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
         # Expensive PIT screen (fundamental lookups + 252d beta regression)
         # runs ONLY when a buy opportunity exists: a slot is free (initial
         # fill or a stop just freed one). Fully-held days skip it entirely.
-        if len(self.selected_symbols) < self.max_positions:
-            # Always run a FRESH point-in-time screen over the full
-            # fundamentals universe. Caching a day-1 selection would freeze
-            # the portfolio and prevent any rotation once slots free up
-            # (root cause of the 12-order backtest: after the initial names
-            # stopped out, the same stale 10 names were retried forever, all
-            # in cooldown -> deadlock).
-            # Filter to tickers that are actually S&P 500 members on this date
-            # to prevent historical/future non-members from filling screen slots.
-            pit_tickers = [
-                t for t in self.fundamentals_history.keys()
-                if intervals_active(self.sp500_membership.get(t, []), date_str)
-            ] if self.sp500_membership else list(self.fundamentals_history.keys())
-            selected = run_fine_selection(
-                algorithm=self,
-                tickers=pit_tickers,
-                max_positions=self.max_positions,
-                bars_cache=self.bars_cache,
-                history_cache=self.fundamentals_history,
-                market_bars=self.market_bars,
-                erp_history_cache=self.erp_history_cache,
-            )
+        invested_cnt = self._invested_count()
+        # Pending buys reserve a slot until filled/invalidated (prevents 11th phantom)
+        pending_cnt = len(self._pending_buys)
+        free_slots = self.max_positions - invested_cnt - pending_cnt
+        if free_slots <= 0:
+            self.Log(f"DailyRebalance {date_str}: book full ({invested_cnt}/{self.max_positions} invested, {pending_cnt} pending) — no screen")
+            return
+        # Always run a FRESH point-in-time screen over the full
+        # fundamentals universe. Caching a day-1 selection would freeze
+        # the portfolio and prevent any rotation once slots free up
+        # (root cause of the 12-order backtest: after the initial names
+        # stopped out, the same stale 10 names were retried forever, all
+        # in cooldown -> deadlock).
+        # Filter to tickers that are actually S&P 500 members on this date
+        # to prevent historical/future non-members from filling screen slots.
+        pit_tickers = [
+            t for t in self.fundamentals_history.keys()
+            if intervals_active(self.sp500_membership.get(t, []), date_str)
+        ] if self.sp500_membership else list(self.fundamentals_history.keys())
+        selected = run_fine_selection(
+            algorithm=self,
+            tickers=pit_tickers,
+            max_positions=self.max_positions,
+            bars_cache=self.bars_cache,
+            history_cache=self.fundamentals_history,
+            market_bars=self.market_bars,
+            erp_history_cache=self.erp_history_cache,
+        )
 
-            # Spec: only ATR stops (and corporate actions above) liquidate.
-            # Empty screen (gap<=0 everywhere) means no new buys — preserve
-            # current holdings and retry next day. ERP failures already emit
-            # ERROR inside run_fine_selection; we just skip buys here.
-            if not selected:
-                self.Log(f"DailyRebalance {date_str}: empty screen (no gap>0) — no new buys, preserving {len(self.selected_symbols)} holdings")
-                return
+        # Spec: only ATR stops (and corporate actions above) liquidate.
+        # Empty screen (gap<=0 everywhere) means no new buys — preserve
+        # current holdings and retry next day. ERP failures already emit
+        # ERROR inside run_fine_selection; we just skip buys here.
+        if not selected:
+            self.Log(f"DailyRebalance {date_str}: empty screen (no gap>0) — no new buys, preserving {len(self.selected_symbols)} holdings")
+            return
 
-            # Never re-add a ticker that has a corporate-action exit today
-            # (rename/merger/delisting or spinoff parent) within the same cycle.
-            selected = [s for s in selected if s not in exits]
+        # Never re-add a ticker that has a corporate-action exit today
+        # (rename/merger/delisting or spinoff parent) within the same cycle.
+        selected = [s for s in selected if s not in exits]
 
-            if not selected:
-                self.Log(f"DailyRebalance {date_str}: all screened tickers have corporate exits today — no new buys")
-                return
+        if not selected:
+            self.Log(f"DailyRebalance {date_str}: all screened tickers have corporate exits today — no new buys")
+            return
 
-            # Add new positions
-            today = self.Time.date()
-            added = set()
-            for symbol_str in selected:
-                if symbol_str in self.selected_symbols:
-                    continue
-                # Cooldown: don't re-buy a symbol recently sold (e.g. stop exit)
-                sold_on = self.sell_dates.get(symbol_str)
-                if sold_on is not None:
+        # Add new positions — whole-share, Cash-aware, Top3 dust fallback, cooldown-enforced
+        import math
+        today = self.Time.date()
+        # Build ranked candidates that pass cooldown / has_bar / not already held/pending
+        # Preserve screen rank; limit to free_slots picks, but keep Top3 pool for fallback
+        candidates = []
+        for symbol_str in selected:
+            if symbol_str in self.selected_symbols or symbol_str in self._pending_buys:
+                continue
+            sold_on = self.sell_dates.get(symbol_str)
+            if sold_on is not None:
+                try:
                     sold_date = datetime.strptime(sold_on, "%Y-%m-%d").date()
-                    if (today - sold_date) < timedelta(days=self.cooldown_days):
-                        continue
-                symbol = self._symbols.get(symbol_str)
-                # HasData is Lean's data-feed flag and stays False until the
-                # next bar arrives, even though we inject today's price via
-                # SetMarketPrice. Check the embedded bar directly to avoid a
-                # 1-day entry lag on index-add names.
-                has_bar = symbol is not None and self.bars_cache.get(symbol_str, {}).get(date_str) is not None
-                if symbol is None or symbol not in self.Securities or not has_bar:
-                    self.Log(f"SKIP {symbol_str}: no price data yet")
+                except (ValueError, TypeError):
+                    sold_date = None
+                if sold_date is not None and (today - sold_date) < timedelta(days=self.cooldown_days):
                     continue
-                weight = 1.0 / self.max_positions
-                self.SetHoldings(symbol, weight)
-                self.trailing_stops[symbol_str] = self._compute_stop(symbol_str)
-                self.Log(f"Added {symbol_str} @ {weight:.1%}")
-                added.add(symbol_str)
-
-            # Spec: only stops/corporate actions remove holdings — not valuation
-            # turnover. So we keep existing holdings and just add new fills.
-            # Un-fillable (no-data) picks do not pin the book because they
-            # are simply not added (added set excludes them).
-            self.selected_symbols = (self.selected_symbols | added)
+            symbol = self._symbols.get(symbol_str)
+            has_bar = symbol is not None and symbol in self.Securities and self.bars_cache.get(symbol_str, {}).get(date_str) is not None
+            if symbol is None or symbol not in self.Securities or not has_bar:
+                self.Log(f"SKIP {symbol_str}: no price data yet")
+                continue
+            candidates.append(symbol_str)
+            if len(candidates) >= free_slots:
+                break
+        if not candidates:
+            self.Log(f"DailyRebalance {date_str}: no candidates pass cooldown/has_bar (free={free_slots})")
+            return
+        # Cash-aware integer sizing: NAV-based 10% floored, last slot uses remaining Cash
+        nav = float(self.Portfolio.TotalPortfolioValue)
+        # Use settled Cash as buying power for Cash account; Lean's Portfolio.Cash is settled
+        try:
+            cash_avail = float(self.Portfolio.Cash)
+        except Exception:
+            cash_avail = nav  # fallback
+        # If cash is tiny/negative due to unsettled, treat as 0
+        if not math.isfinite(cash_avail) or cash_avail < 0:
+            cash_avail = 0.0
+        remaining_cash = cash_avail
+        # Reserve fee buffer per order (IBKR $1 min, $0.005/share) + 0.5% slippage (close->open)
+        fee_min = 1.0
+        fee_per_share = 0.005
+        slippage = 1.005
+        for idx, symbol_str in enumerate(list(candidates)):
+            is_last = (idx == len(candidates) - 1)
+            symbol = self._symbols.get(symbol_str)
+            bar = self.bars_cache.get(symbol_str, {}).get(date_str, {})
+            try:
+                price = float(bar.get("close", 0))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(price) or price <= 0:
+                self.Log(f"SKIP {symbol_str}: invalid price {price}")
+                continue
+            # Compute integer shares — floor, never fractional; use effective (slippage) price for qty
+            eff_price = price * slippage
+            target_cash = nav * 0.10
+            if is_last:
+                # Last slot uses whatever Cash remains (adaptive), capped to NAV 10%
+                target_cash = min(target_cash, remaining_cash)
+                qty = int(target_cash // eff_price) if eff_price > 0 else 0
+                # Enforce fee-aware floor: qty*eff_price + fee <= remaining_cash
+                qty_fee_capped = int(max(0, (remaining_cash - fee_min) // eff_price)) if eff_price > 0 else 0
+                qty = min(qty, qty_fee_capped)
+                # Adjust down for per-share fee (using effective price)
+                while qty > 0:
+                    fee_est = max(fee_min, fee_per_share * qty)
+                    if qty * eff_price + fee_est <= remaining_cash:
+                        break
+                    qty -= 1
+                if qty <= 0:
+                    # Dust fallback: try Top3 screened names not already candidates/held/pending
+                    fallback_done = False
+                    top3_pool = selected[:3] if len(selected) >= 3 else selected[:]
+                    for cand in top3_pool:
+                        if cand in candidates or cand in self.selected_symbols or cand in self._pending_buys:
+                            continue
+                        sold_on2 = self.sell_dates.get(cand)
+                        if sold_on2 is not None:
+                            try:
+                                sold_date2 = datetime.strptime(sold_on2, "%Y-%m-%d").date()
+                            except (ValueError, TypeError):
+                                sold_date2 = None
+                            if sold_date2 is not None and (today - sold_date2) < timedelta(days=self.cooldown_days):
+                                continue
+                        sym2 = self._symbols.get(cand)
+                        has_bar2 = sym2 is not None and sym2 in self.Securities and self.bars_cache.get(cand, {}).get(date_str) is not None
+                        if not has_bar2:
+                            continue
+                        bar2 = self.bars_cache.get(cand, {}).get(date_str, {})
+                        try:
+                            price2 = float(bar2.get("close", 0))
+                        except (TypeError, ValueError):
+                            continue
+                        if not math.isfinite(price2) or price2 <= 0:
+                            continue
+                        eff_price2 = price2 * slippage
+                        qty2 = int(max(0, (remaining_cash - fee_min) // eff_price2)) if eff_price2 > 0 else 0
+                        while qty2 > 0:
+                            fee_est2 = max(fee_min, fee_per_share * qty2)
+                            if qty2 * eff_price2 + fee_est2 <= remaining_cash:
+                                break
+                            qty2 -= 1
+                        if qty2 >= 1:
+                                self.Log(f"Dust fallback: {symbol_str} unaffordable (Cash={remaining_cash:.2f} price={price:.2f}), trying {cand} price={price2:.2f} qty={qty2}")
+                                symbol_str = cand
+                                symbol = sym2
+                                price = price2
+                                eff_price = eff_price2
+                                qty = qty2
+                                fallback_done = True
+                                break
+                    if not fallback_done:
+                        self.Log(f"SKIP dust {symbol_str}: Cash={remaining_cash:.2f} price={price:.2f} qty=0 — waiting next rebalance (Top3 none affordable/cooldown)")
+                        continue
+            else:
+                qty = int(target_cash // eff_price) if eff_price > 0 else 0
+                # Cap non-last by remaining cash so we don't starve last slot entirely
+                qty_cap = int(max(0, (remaining_cash - fee_min) // eff_price)) if eff_price > 0 else 0
+                if qty > qty_cap:
+                    qty = qty_cap
+                while qty > 0:
+                    fee_est = max(fee_min, fee_per_share * qty)
+                    if qty * eff_price + fee_est <= remaining_cash:
+                        break
+                    qty -= 1
+                if qty <= 0:
+                    self.Log(f"SKIP {symbol_str}: insufficient Cash {remaining_cash:.2f} for 1 share at {price:.2f} (eff {eff_price:.2f})")
+                    continue
+            # Final fee check (using effective price so open slippage fits)
+            fee_est = max(fee_min, fee_per_share * qty)
+            if qty * eff_price + fee_est > remaining_cash + 1e-9:
+                self.Log(f"SKIP {symbol_str}: need {qty*eff_price+fee_est:.2f} (eff) > Cash {remaining_cash:.2f}")
+                continue
+            # Place integer market order — whole shares only, no fractional
+            self.MarketOrder(symbol, qty)
+            self._pending_buys.add(symbol_str)
+            remaining_cash -= qty * price + fee_est
+            self.Log(f"Order BUY {symbol_str} qty={qty} price={price:.2f} cost={qty*price:.2f} fee~{fee_est:.2f} CashLeft~{remaining_cash:.2f} (NAV10%={nav*0.10:.2f})")
+        # Do NOT update selected_symbols here — wait for OnOrderEvent Filled
+        # Spec: only stops/corporate actions remove holdings — preserves until fill
 
     # ------------------------------------------------------------------
     # ATR stops
@@ -438,6 +585,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
                 self.Liquidate(symbol)
                 self.selected_symbols.discard(symbol_str)
                 self.trailing_stops.pop(symbol_str, None)
+                self._pending_buys.discard(symbol_str)
                 self.sell_dates[symbol_str] = date_str  # start cooldown
             else:
                 self.Log(f"STOP CHECK {symbol_str} {date_str}: price={price:.2f} stop={stop:.2f} OK")
@@ -450,6 +598,7 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             self.Liquidate(symbol)
         self.sell_dates[symbol_str] = self.Time.strftime("%Y-%m-%d")  # start cooldown
         self.trailing_stops.pop(symbol_str, None)
+        self._pending_buys.discard(symbol_str)
         # Drop from the tracked set so the slot frees up and future re-screens
         # are not frozen by a phantom "full" book.
         self.selected_symbols.discard(symbol_str)
@@ -466,6 +615,54 @@ class PbRoeAtrAlgorithm(QCAlgorithm):
             as_of_date=self.Time.strftime("%Y-%m-%d"),
             prev_stop=prev_stop,
         )
+
+    def OnOrderEvent(self, orderEvent):
+        """Handle order fills / invalidations to keep selected_symbols coherent.
+        Cash account Invalid orders must NOT occupy a slot (phantom fix).
+        Filled orders initialize ATR stop and become tracked holdings.
+        """
+        try:
+            # Lean OrderEvent has .Symbol (Security Symbol) and .Status (OrderStatus)
+            status = orderEvent.Status
+            # OrderStatus enum: Filled=1, Invalid=3, Canceled etc — use string for robustness
+            status_str = str(status).lower() if status is not None else ""
+            # Extract ticker string from Symbol
+            sym = getattr(orderEvent, "Symbol", None)
+            ticker = None
+            if sym is not None:
+                # Symbol has .Value or str(sym) yields ticker
+                ticker = getattr(sym, "Value", None) or str(sym).split()[0]
+            else:
+                ticker = getattr(orderEvent, "SymbolValue", None) or getattr(orderEvent, "symbolValue", None)
+            if not ticker:
+                return
+            # Normalize ticker (Lean may add security id, e.g. "AAPL XYZ" -> "AAPL")
+            ticker = str(ticker).split()[0].strip().upper()
+            if "filled" in status_str:
+                # Order filled — promote from pending to held
+                if ticker in self._pending_buys:
+                    self._pending_buys.discard(ticker)
+                # Only add if we have price data and not already held
+                if ticker not in self.selected_symbols:
+                    self.selected_symbols.add(ticker)
+                    # Initialize trailing stop at fill price
+                    try:
+                        stop = self._compute_stop(ticker)
+                        if stop is not None:
+                            self.trailing_stops[ticker] = stop
+                    except Exception:
+                        pass
+                    self.Log(f"OrderEvent FILLED {ticker} qty={getattr(orderEvent,'FillQuantity',getattr(orderEvent,'Quantity',0))} price={getattr(orderEvent,'FillPrice',0):.2f}")
+            elif "invalid" in status_str or "canceled" in status_str or "cancelled" in status_str:
+                # Order rejected — free slot, do not track
+                was_pending = ticker in self._pending_buys
+                self._pending_buys.discard(ticker)
+                self.selected_symbols.discard(ticker)
+                self.trailing_stops.pop(ticker, None)
+                msg = getattr(orderEvent, "Message", "") or ""
+                self.Log(f"OrderEvent {status_str.upper()} {ticker} pending={was_pending} msg={msg} — slot freed")
+        except Exception as e:
+            self.Log(f"OnOrderEvent error: {e}")
 
     def OnEndOfAlgorithm(self):
         self.Log("=" * 60)
