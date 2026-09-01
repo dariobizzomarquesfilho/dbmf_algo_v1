@@ -28,6 +28,7 @@ coverage.xml
 # ===========================================
 .env
 .env.*
+!config/.env.example
 
 # ===========================================
 # IDE / Editor
@@ -49,9 +50,8 @@ Thumbs.db
 desktop.ini
 
 # ===========================================
-# Node / Kilo
+# Node
 # ===========================================
-.kilo/
 node_modules/
 npm-debug.log*
 yarn-debug.log*
@@ -59,16 +59,16 @@ yarn-error.log*
 pnpm-debug.log*
 
 # ===========================================
-# AI / Tool caches
+# AI / Tool caches (+ internal agent docs)
 # ===========================================
 .claude/
 .firecrawl/
+.kilo/
 
-# ===========================================
-# Git
-# ===========================================
-.git/
-.gitattributes
+# Agent/internal docs — not part of portfolio showcase
+CLAUDE.md
+AGENTS.md
+docs/superpowers/
 
 # ===========================================
 # QuantConnect Lean — Data artifacts
@@ -102,7 +102,6 @@ lean_project/data/equity/**/*.csv
 lean_project/data/alternative/**/*.csv
 lean_project/data/symbol-properties/*.csv
 lean_project/data/market-hours/*.json
-lean_project/data/sp500_ticker_start_end.csv
 lean_project/data/__pycache__/
 
 # ===========================================
@@ -130,10 +129,16 @@ implied_erp/data/*.xls
 *.sqlite3
 *.zip~*
 
+# --- Portfolio essential data: keep tracked despite *.csv/*.zip ---
+!lean_project/data/sp500_ticker_start_end.csv
+!lean_project/data/sp500_cik_map.csv
+!lean_project/report.html
+
 # ===========================================
-# Backtest artifacts
+# Backtest artifacts (keep report.html as portfolio showcase)
 # ===========================================
 lean_project/backtests/
+# report.html is intentionally tracked — do not ignore
 
 # ===========================================
 # Logs & Temp
@@ -145,6 +150,8 @@ logs/
 # Backup / merge junk
 # ===========================================
 *.bak
+*.bak.json
+*predeep*
 *.backup
 *.orig
 *.rej

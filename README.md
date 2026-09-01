@@ -1,202 +1,181 @@
 # DBMF Quant
 
-Quantitative trading system for the Dario Filho secondary portfolio. Primary deliverable is a QuantConnect Lean backtest of a P/B vs ROE ATR trailing stop strategy, supported by an implied equity risk premium (ERP) extraction pipeline and standalone utility modules.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](config/requirements.txt)
+[![QuantConnect Lean](https://img.shields.io/badge/Lean-1.0.228-orange.svg)](lean_project/lean.json)
+[![Tests](https://img.shields.io/badge/tests-pytest-green.svg)](lean_project/tests)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Point-in-time QuantConnect Lean backtest of a **P/B vs ROE + ATR trailing stop** strategy on the S&P 500, plus a Damodaran implied ERP extraction pipeline. All runtime data is embedded (`zlib`+`base64`) — zero file I/O at backtest time, no look-ahead.
+
+> **Portfolio showcase:** open `lean_project/report.html` locally for the full backtest report (equity curve, drawdown, trades). The report is tracked as a showcase artifact.
+
+## Strategy at a Glance
+
+1. **Universe:** S&P 500 PIT membership from `lean_project/data/sp500_ticker_start_end.csv` (`intervals_active`). Members active at `BACKTEST_START` are pre-subscribed; later additions are `AddEquity()`-ed on their index-add date.
+2. **Screen (daily):** TTM fundamentals from SEC EDGAR (edgartools, keyed by **filing_date**, not fiscal period) → 2-stage Gordon growth → intrinsic P/B → CAPM (`^TNX` as risk-free, `^GSPC` beta, Damodaran ERP PIT) → select where `intrinsic P/B > actual P/B` (undervalued).
+3. **Financials excluded** via EDGAR SIC/business category (current classification, documented limitation).
+4. **Equal-weight** `1/max_positions`, **ATR trailing stop** exits (SMA/EMA/WMA/RMA).
+
+See `lean_project/README.md` for the runtime flow diagram and `docs/equity-data-pipeline.md` for the 5-step data pipeline.
+
+## Backtest Report
+
+The last backtest (2011-01-01 → 2026-07-31, $100k, warm-up 252 trading days) is in:
+
+```
+lean_project/report.html    # interactive HTML — open in a browser
+```
+
+To reproduce: `cd lean_project && lean backtest` (requires Docker `quantconnect/lean:foundation`). The window is driven by `config/.env` → `config/config.py` → `lean_project/data/backtest_config.py` → `lean_project/lean.json` (re-run `python lean_project/scripts/embed_data.py` after any `.env` change).
+
+## Key Design Decisions (PIT / No Look-Ahead)
+
+- Embedded bars/fundamentals/ERP in Python modules, prices via `Security.SetMarketPrice()` (fixes `Security.Price == 0` at scheduled times).
+- Daily rebalance from `OnData` (one cycle per trading day); `CoarseSelection`/`FineSelection` Lean hooks are not used.
+- `fundamental_as_of(ticker, as_of)` picks latest filing with `filing_date <= as_of`; legacy fiscal-period-keyed rows are rejected (would be ~30-45d look-ahead).
+- `resolve_erp_as_of()` prefers Damodaran spreadsheet PIT series, falls back to annual `histimpl`; never invents ERP (empty universe if neither yields data).
+- `resolve_risk_free_rate()` from `^TNX` embedded bars PIT only (returns `None` → screen skipped; no static `0.042` fallback).
+- `corporate_actions.last_trading_day` and membership exits are NYSE-calendar aware (`lean_project/data/nys_calendar.py`).
+- Bars are clipped to membership intervals; ATR/beta use the embedded bar dict, not `algorithm.History()`.
+
+## Limitations & Disclosure
+
+This backtest is PIT but not free of accepted gaps. Full disclosure is in `docs/data-limitations.md` and the generated `lean_project/data/missing-data.txt`.
+
+- **Fundamentals coverage:** EDGAR XBRL starts ~2009; many later S&P 500 additions only have fundamentals from ~2019. Early windows are thinner — tickers without a filing at-or-before the date are skipped (no static fallback). Re-run `scripts/download_edgartools_data.py` quarterly.
+- **Bars:** yfinance `auto_adjust=True` (splits/dividends adjusted). Some names have gaps: EA/FOX/FOXA/IR flagged at embed time until a re-download repairs them. Throttled tickers appear as `PENDING` in `repair_equity_data.py` — retry after a cooldown.
+- **Survivorship:** `window_members_without_fundamentals` = `window_members - fundamentals_keys` (≈ 607 tickers in the 2011-2026 window). Bars and fundamentals are independent sources — this is expected, not a bug. See `docs/data-limitations.md:§3`.
+- **Renames/delisted:** `fetch_missing_delisted.py` recovers via curated `RENAME_MAP` + Tiingo fallback (US-exchange-guarded; `tiingo_foreign_collision` rejected). Unrecoverable names go to `equity_unavailable.json`.
+- **Financials classification:** uses current SIC (`L1 accepted`), not PIT SIC history.
+- **Risk-free:** USD-only (`^TNX`).
+- **Interest-rate CSV:** `lean_project/data/alternative/interest-rate/usa/interest-rate.csv` is cosmetic (Lean parse-fixed); strategy uses `^TNX` bars.
+
+Run `python lean_project/scripts/track_exclusions.py` to regenerate the exclusion counts.
 
 ## Project Structure
 
 ```
 dbmf_quant_v2/
-├── README.md                   # This file
-├── CLAUDE.md                   # Project guidance for Claude Code
-├── .gitignore
+├── README.md                    # this file
+├── LICENSE                      # MIT
 ├── config/
-│   ├── __init__.py
-│   ├── config.py               # Env-driven backtest window, warm-up, history start
-│   ├── .env                    # SEC_USER, BACKTEST_START, BACKTEST_END (gitignored)
-│   └── requirements.txt        # Python dependencies
+│   ├── config.py                # env-driven window, warm-up, HISTORY_START
+│   ├── .env.example             # template (copy to .env)
+│   └── requirements.txt         # yfinance, edgartools==5.52.0, lean==1.0.228, ...
 ├── docs/
-│   └── superpowers/
-│       ├── plans/               # Implementation plans
-│       └── specs/               # Design specs
-├── implied_erp/                # Damodaran ERP extraction pipeline
-│   ├── extract_damodaran_erp.py  # Full extraction (.xlsx → structured JSON)
+│   ├── equity-data-pipeline.md  # 5-step bar/fundamental pipeline + recovery scenarios
+│   └── data-limitations.md      # PIT rules, survivorship & accepted gaps
+├── implied_erp/                 # Damodaran ERP extraction + PIT builder
+│   ├── extract_damodaran_erp.py
 │   ├── README.md
 │   ├── data/
-│   │   ├── erp/                  # Per-period extracted JSONs (2013-2026)
-│   │   │   ├── _index.json
-│   │   │   └── erp_*.json
-│   │   └── raw/                  # Downloaded .xls/.xlsx (gitignored)
+│   │   ├── erp/                 # per-period JSONs (gitignored, examples not tracked)
+│   │   └── raw/                 # downloaded .xls/.xlsx (gitignored)
 │   └── scripts/
-│       ├── download_damodaran_erp.py  # Download archive .xls/.xlsx via HTTP
-│       ├── extract_all_damodaran_erp.py  # Batch extract all periods
-│       ├── scrape_histimpl.py            # Historical US implied ERP (histimpl)
-│       └── build_lean_erp_history.py     # Build Lean-compatible PIT ERP history
-└── lean_project/               # QuantConnect Lean backtest (primary deliverable)
-    ├── main.py                 # PbRoeAtrAlgorithm — event-driven rebalancing
-    ├── lean.json               # Lean v2 config (organization, dates, data folder)
-    ├── README.md               # Lean-specific documentation
+│       ├── download_damodaran_erp.py
+│       ├── extract_all_damodaran_erp.py
+│       ├── scrape_histimpl.py
+│       └── build_lean_erp_history.py
+└── lean_project/                # Lean backtest (primary deliverable)
+    ├── main.py                  # PbRoeAtrAlgorithm
+    ├── lean.json
+    ├── report.html              # last backtest report (showcase artifact, tracked)
     ├── data/
-    │   ├── equity_bars.py      # Embedded daily bars (~790 tickers × ~1,897 bars)
-    │   ├── equity_bars.json    # Source bars data (for regeneration)
-    │   ├── damodaran_erp_history.py  # Embedded US ERP PIT series (2001-2026)
-    │   ├── damodaran_erp_history.json  # Source PIT ERP history
-    │   ├── fundamentals_history.py  # Embedded quarterly PIT fundamentals (TTM)
-    │   ├── fundamentals_history.json  # Source quarterly PIT history (edgartools)
-    │   ├── backtest_config.py    # Embedded backtest window (from config/.env)
-    │   ├── bootstrap_data.py     # Writes CSV.zip files into Lean's data folder
-    │   ├── sp500_data.py         # S&P 500 PIT membership utilities
-    │   ├── corporate_actions.py  # Curated S&P 500 spinoffs
-    │   ├── exclusions.py         # Aggregate excluded tickers (broken, missing, documented)
-    │   ├── delisted_aliases.py   # Delisted ticker alias mappings
-    │   ├── bar_quality.py        # Bar-quality gate (impossible OHLC, zero prices)
-    │   ├── sp500_ticker_start_end.csv  # S&P 500 membership with start/end dates
-    │   ├── equity/               # Lean equity .zip files + map_files (daily bars)
-    │   └── alternative/
-    │       └── interest-rate/usa/interest-rate.csv  # Cosmetic (strategy uses ^TNX)
-    ├── universe/
-    │   ├── pb_roe_universe.py   # Fine selection: P/B vs ROE Gordon-growth screen
-    │   └── pit_data.py           # Point-in-time fundamental + rolling-beta helpers
-    ├── indicators/
-    │   └── atr_trailing_stop.py  # ATR trailing stop (SMA/EMA/WMA/RMA)
-    ├── valuation/
-    │   └── gordon_growth.py      # Intrinsic P/B (2-stage Gordon growth)
-    ├── scripts/
-    │   ├── embed_data.py         # Build: JSON → embedded Python modules (zlib+base64)
-    │   ├── download_equity_data.py  # Fetch S&P 500 bars via yfinance
-    │   ├── download_edgartools_data.py  # TTM fundamentals + quarterly PIT from SEC 10-Q
-    │   ├── convert_to_qc_format.py     # Convert data to QC zip format
-    │   ├── repair_equity_data.py       # Repair/fix equity bar data
-    │   ├── fetch_missing_delisted.py   # Fetch missing/delisted ticker data
-    │   ├── build_cik_map.py            # Ticker → CIK map (edgar self-bootstrap)
-    │   ├── common.py                   # Shared download/repair helpers
-    │   └── track_exclusions.py         # Track excluded tickers and reasons
-    ├── tests/                    # pytest test suite
-    │   ├── conftest.py
-    │   ├── test_embed.py
-    │   ├── test_equity_completeness.py
-    │   ├── test_erp_pit.py
-    │   ├── test_eps_growth.py
-    │   ├── test_bugfix_audit.py
-    │   └── test_pit_data.py
-    └── Lean/                     # QuantConnect Lean framework
+    │   ├── equity_bars.py / fundamentals_history.py / damodaran_erp_history.py  # embedded (gitignored, generated)
+    │   ├── sp500_ticker_start_end.csv   # PIT membership (tracked)
+    │   ├── sp500_cik_map.csv            # ticker→CIK (tracked)
+    │   ├── bootstrap_data.py / sp500_data.py / bar_quality.py / exclusions.py / ...
+    │   └── equity/ / alternative/       # Lean CSV.zip data (generated)
+    ├── universe/  pb_roe_universe.py / pit_data.py
+    ├── indicators/atr_trailing_stop.py
+    ├── valuation/gordon_growth.py
+    ├── scripts/  download_* / repair_* / fetch_* / track_* / embed_data.py / ...
+    ├── tests/    # pytest (lean_project/tests + implied_erp/tests)
+    └── Lean/     # Lean engine source (gitignored)
 ```
 
-## Modules
-
-### Lean Backtest (Primary)
-
-The `lean_project/` directory contains the QuantConnect Lean migration of the P/B vs ROE ATR trailing stop strategy.
-
-**Strategy logic:**
-1. Screen S&P 500 constituents using embedded edgartools TTM fundamentals (from SEC 10-Q filings) + yfinance price data
-2. Compute implied P/B via 2-stage Gordon growth model with CAPM cost of equity
-3. Select stocks where implied P/B > actual P/B (undervalued)
-4. Equal-weight positions (1/max_positions)
-5. Exit positions when ATR trailing stop is breached
-6. Filter out financials using edgar's native SIC/business classification
-
-**Key design decisions:**
-- All data is embedded in Python modules (no external .csv.zip or .json files at runtime)
-- Prices injected via `Security.SetMarketPrice()` to avoid Security.Price=0 bug
-- Daily rebalance triggered from `OnData` (one cycle per new trading day, after the daily bar arrives); `CoarseSelection`/`FineSelection` Lean hooks are not used
-- S&P 500 membership is point-in-time: members active at the start date are pre-subscribed, later additions are `AddEquity()`-ed on their index-add date via `data.sp500_data.intervals_active` (long-dead historical members are never subscribed)
-- ATR computation uses embedded bars dict (bypasses `algorithm.History()`)
-- Risk-free rate from ^TNX embedded bars, point-in-time as-of the rebalance date (not from interest-rate.csv)
-- Financial sector excluded via edgar native classification (SIC/business category)
-- Fundamentals use TTM from SEC 10-Q filings (edgartools)
-- PIT quarterly fundamentals used when available; tickers without quarterly coverage at a date are skipped (no static snapshot fallback — that would be look-ahead bias)
-- Backtest window is single source of truth: `config/.env` → `config/config.py` → `data/backtest_config.py` → `lean.json`
-
-### Implied ERP
-
-Extracts country-level equity risk premiums from Damodaran's spreadsheet (`ctryprem*.xlsx`) into structured JSON. (The former lightweight `build_damodaran_erp.py` static snapshot was removed — the Lean backtest now uses only the point-in-time ERP history described below.)
-
-```powershell
-# Full extraction (all fields)
-python implied_erp/extract_damodaran_erp.py --xlsx "path/to/ctrypremJuly26.xlsx" --out "output.json"
-```
-
-### Damodaran ERP PIT Pipeline (for Lean backtest)
-
-Gives the Lean backtest access to historical Damodaran ERP as a point-in-time series (no look-ahead bias).
-
-```powershell
-# 1. Download archive .xls files (2001-2025) + current 2026 .xlsx
-python implied_erp/scripts/download_damodaran_erp.py --dry-run   # preview
-python implied_erp/scripts/download_damodaran_erp.py             # download
-
-# 2. Extract all into per-period JSONs
-python implied_erp/scripts/extract_all_damodaran_erp.py
-
-# 3. Build Lean-compatible PIT history
-python implied_erp/scripts/build_lean_erp_history.py
-
-# 4. Embed into Lean
-cd lean_project && python scripts/embed_data.py
-```
+> `lean_project/Lean/` is a cloned Lean engine (gitignored). Run `.\run_pipeline.ps1` for the full pipeline with per-step logs in `logs/<timestamp>/`.
 
 ## Setup
 
 ```powershell
-# Activate virtual environment
+# 1. Clone and enter
+git clone https://github.com/dariobizzomarquesfilho/dbmf_quant_v2.git
+cd dbmf_quant_v2
+
+# 2. Virtualenv (Windows PowerShell; Linux/macOS: python -m venv .venv && source .venv/bin/activate)
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+pip install -r config/requirements.txt   # restores `lean` CLI and `edgar` (edgartools)
 
-# Install dependencies
-pip install -r config/requirements.txt
+# 3. Env
+cp config/.env.example config/.env
+# edit config/.env: set SEC_USER="Full Name email@domain" (required for edgartools)
+# optional: BACKTEST_START, BACKTEST_END, BACKTEST_WARMUP_DAYS, TIINGO_API_KEY
 ```
 
-## Running the Lean Backtest
+`config/config.py` validates `SEC_USER` and computes `DATA_START = BACKTEST_START - 252 trading days` and `HISTORY_START` (earliest membership start or `BACKTEST_HISTORY_START` env).
+
+## Running the Backtest
+
+```powershell
+cd lean_project
+lean backtest            # or: lean backtest --config lean.json
+# then open the report
+start report.html        # Windows; macOS: open report.html
+```
+
+Docker image `quantconnect/lean:foundation` is required. `lean_project/lean.json` dates are overwritten by `scripts/embed_data.py` — never edit them by hand.
+
+## Regenerating Embedded Data (quarterly recommended)
 
 ```powershell
 cd lean_project
 
-# Run backtest with Lean CLI
-lean backtest
+# fundamentals from SEC EDGAR (PIT quarterly TTM)
+python scripts/download_edgartools_data.py              # --tickers AAPL MSFT for a quick test
 
-# Or specify config explicitly
-lean backtest --config lean.json
-```
-
-The backtest window is configured in `config/.env` via `BACKTEST_START`/`BACKTEST_END` (propagated through `config/config.py` → `data/backtest_config.py` → `lean.json` by `scripts/embed_data.py`; re-run embed after any `.env` change) with $100,000 initial capital. Equity bar data must additionally cover a warm-up window before `BACKTEST_START` (>= `BACKTEST_WARMUP_DAYS` trading days, default 252) so rolling indicators like beta/ATR have enough prior bars. `scripts/download_equity_data.py` pulls from `config.HISTORY_START` through `config.BACKTEST_END`; `scripts/embed_data.py` hard-fails if coverage is missing.
-
-### Regenerating Embedded Data
-
-If you need to refresh the embedded data (recommended quarterly since `book_value` changes every earnings report):
-
-```powershell
-cd lean_project
-
-# 1. Download quarterly PIT fundamentals from SEC filings (edgartools)
-python scripts/download_edgartools_data.py
-
-#    Use --tickers AAPL MSFT GOOG to limit to specific tickers for testing
-#    Use --backtest-start to control how far back history goes (default: config.DATA_START)
-
-# 2. Download fresh equity bars from yfinance (full S&P 500 list + ^GSPC)
+# bars from yfinance (full S&P 500 + ^GSPC + ^TNX)
 python scripts/download_equity_data.py
+python scripts/repair_equity_data.py
+python scripts/fetch_missing_delisted.py                # dry-run
+python scripts/fetch_missing_delisted.py --apply
+python scripts/track_exclusions.py                      # verify missing-data.txt
 
-# 3. Convert to QC zip format (for bootstrap)
+# QC zip + embed (hard-fails if coverage missing)
 python scripts/convert_to_qc_format.py
-
-# 4. Embed everything into Python modules
 python scripts/embed_data.py
 ```
 
-After step 4, commit the regenerated `data/*_json.py`, `data/*_bars.py`, `data/fundamentals_history.py`, and `data/damodaran_erp_history.py` files.
+After `embed_data.py`, the generated `*bars.py` / `*_history.py` / `backtest_config.py` stay gitignored; commit only if you intend to publish a new data vintage. See `docs/equity-data-pipeline.md` for throttling recovery (Scenario A/B/C).
+
+## Damodaran ERP PIT Pipeline
+
+```powershell
+python implied_erp/scripts/download_damodaran_erp.py             # or --dry-run
+python implied_erp/scripts/extract_all_damodaran_erp.py
+python implied_erp/scripts/build_lean_erp_history.py             # → lean_project/data/damodaran_erp_history.json
+cd lean_project && python scripts/embed_data.py                  # embed
+# optional annual fallback: python implied_erp/scripts/scrape_histimpl.py
+```
+
+## Testing
+
+```powershell
+python -m pytest lean_project/tests implied_erp/tests
+python -m pytest lean_project/tests/test_pit_data.py -v
+```
+
+No linter/formatter is configured; tests are the gate. `run_pipeline.ps1` runs the full chain (ERP → fundamentals/bars → embed → tests → backtest) with logs in `logs/<yyyyMMdd_HHmmss>/`.
 
 ## Requirements
 
-- Python 3.11+
-- Windows 11 (PowerShell)
-- Docker (for Lean backtesting)
-- QuantConnect Lean CLI v1.0.228 (pinned in `config/requirements.txt`; `pip install -r config/requirements.txt` restores it)
+- Python 3.11+, Docker (for `lean backtest`)
+- QuantConnect Lean CLI `1.0.228` (pinned; `pip install -r config/requirements.txt` restores it)
+- `edgartools==5.52.0` provides `edgar` for SEC filings
 
-## Known Issues
+Cross-platform: primary dev is Windows PowerShell, but `lean backtest` and Python scripts run on Linux/macOS as well (use `source .venv/bin/activate`).
 
-1. **Interest rate CSV**: `data/alternative/interest-rate/usa/interest-rate.csv` had dates in `YYYYMMDD` format which Lean couldn't parse. Fixed by converting to `YYYY-MM-DD`. The strategy uses ^TNX from embedded bars for the risk-free rate, so this file is cosmetic only.
-2. **82% max drawdown**: Strategy design concern, not a bug.
-3. **No linter or formatter configured**: No `flake8`, `black`, `ruff`, or `pylint` configuration (a pytest suite exists under `lean_project/tests` and `implied_erp/tests`).
-4. **yfinance negative bookValue**: yfinance returns negative `bookValue` and `priceToBook` for ~33 S&P 500 tickers (SBUX, MCD, ABBV, LOW, etc.). These tickers are skipped per-screen when book_value is invalid — they are not dropped from the cache and may have valid book_value in a future quarter after refresh. P/B is always computed dynamically as `current_price / book_value` for the correct time period.
-5. **PIT data coverage depth varies by ticker**: `fundamentals_history.json` covers ~687 tickers via edgartools SEC XBRL, but XBRL facts only reach back to ~2009 and many later-added S&P 500 names only gained fundamentals ~2019, so early-window universes are thinner. When quarterly data is unavailable for a ticker at a given backtest date, the screen skips it (no static fallback — using current data for historical dates would be look-ahead bias). Run `python scripts/download_edgartools_data.py` periodically to accumulate new quarters via SEC filings.
-6. **USD-only risk-free rate**: the CAPM cost of equity uses ^TNX (USD); non-USD listings are out of scope.
-7. **Known bar-coverage gaps**: EA / FOX / FOXA / IR have incomplete or late-starting bars in the current `equity_bars.json`; `embed_data.py` reports them at embed time until a re-download repairs them.
+## License
+
+MIT — see [LICENSE](LICENSE).

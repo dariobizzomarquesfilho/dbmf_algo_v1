@@ -1,0 +1,6 @@
+# Normalize line endings
+* text=auto
+
+# Large data — use LFS if you ever track generated bars (currently gitignored)
+# lean_project/data/equity_bars.json filter=lfs diff=lfs merge=lfs -text
+# lean_project/data/fundamentals_history.json filter=lfs diff=lfs merge=lfs -text
