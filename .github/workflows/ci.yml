@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
           cache: pip
       - name: Install dependencies
         run: pip install -r config/requirements.txt
@@ -19,3 +19,4 @@ jobs:
         run: python -m pytest lean_project/tests implied_erp/tests -q
         env:
           SEC_USER: "CI ci@example.com"
+
