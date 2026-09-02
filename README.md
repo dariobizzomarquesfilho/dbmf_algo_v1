@@ -1,4 +1,4 @@
-# DBMF Quant
+# DBMF Algo v.1
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](config/requirements.txt)
 [![QuantConnect Lean](https://img.shields.io/badge/Lean-1.0.228-orange.svg)](lean_project/lean.json)
