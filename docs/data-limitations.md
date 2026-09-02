@@ -1,149 +1,96 @@
-# Data Limitations & Survivorship Disclosure
+# Data Limitations and Survivorship Disclosure
 
-> Companion to `docs/equity-data-pipeline.md` and `lean_project/data/missing-data.txt`.
-> Generated pipeline is PIT (point-in-time); this document records the *accepted* gaps
-> that remain after all feasible recovery steps.
+Companion to `docs/equity-data-pipeline.md` and `lean_project/data/missing-data.txt`. The pipeline is point-in-time. This document records accepted gaps that remain after all feasible recovery steps have been applied.
 
-## 1. Methodology (how the backtest universe is built)
+## 1. Methodology
 
-* **Membership** — S&P 500 constituents from `lean_project/data/sp500_ticker_start_end.csv`
-  (`data/sp500_data.py:intervals_active`). Each ticker has one or more
-  `[start_date, end_date]` intervals; only bars with `date` inside an interval are
-  retained (`clip_to_membership`). This makes the membership itself PIT.
+**Membership.** S&P 500 constituents are defined in `lean_project/data/sp500_ticker_start_end.csv` via `data/sp500_data.py:intervals_active` (path:line `lean_project/data/sp500_data.py:38`). Each ticker has one or more `[start_date, end_date]` intervals. Bars with dates outside all intervals for a given ticker are removed by `clip_to_membership` (path:line `lean_project/data/sp500_data.py:53`). Membership is therefore point-in-time.
 
-* **Bars** — Daily OHLCV from `yfinance` (`auto_adjust=True`) via
-  `scripts/download_equity_data.py` → `repair_equity_data.py` → `fetch_missing_delisted.py`.
-  Fetch window is `HISTORY_START .. BACKTEST_END` where `HISTORY_START` =
-  `BACKTEST_HISTORY_START` env or earliest `start_date` in the CSV (fallback
-  `1996-01-02`), and the warm-up floor is `DATA_START = BACKTEST_START - 252 NYSE
-  trading days` (via `data/nys_calendar.trading_days_before`). The backtest itself
-  runs `BACKTEST_START .. BACKTEST_END` from `config/.env` (single source of truth,
-  propagated via `lean_project/scripts/embed_data.py` → `data/backtest_config.py` → `lean.json`).
+**Price bars.** Daily OHLCV bars are sourced from yfinance (`auto_adjust=True`) via `scripts/download_equity_data.py`, `repair_equity_data.py`, and `fetch_missing_delisted.py`. The fetch window is `HISTORY_START` to `BACKTEST_END`, where `HISTORY_START` is `BACKTEST_HISTORY_START` if set, otherwise the earliest `start_date` in the membership CSV, otherwise `1996-01-02` (`config/config.py:_compute_history_start`, path:line `config/config.py:46`). The warm-up floor is `DATA_START = BACKTEST_START - 252 NYSE trading days` (`data/nys_calendar.py:trading_days_before`, path:line `config/config.py:82`). The backtest window itself is `BACKTEST_START` to `BACKTEST_END` from `config/.env`, propagated via `lean_project/scripts/embed_data.py` to `data/backtest_config.py` and `lean.json`.
 
-* **Fundamentals** — Quarterly TTM snapshots from SEC EDGAR (`edgar` / `edgartools`)
-  via `lean_project/scripts/download_edgartools_data.py`, stored in
-  `lean_project/data/fundamentals_history.json`. Keyed by **filing date** (`filed` /
-  `filing_date`, the SEC acceptance date), *not* fiscal `period` / `report_date`.
-  Access is via `universe/pit_data.fundamental_as_of(ticker, as_of)` which picks the
-  latest snapshot with `filing_date <= as_of`. Legacy period-keyed entries (no
-  `filed` field) are **rejected** (`continue` / `None`) — run the download script
-  to regenerate. This prevents ~30-45 day look-ahead bias. `period` is retained only
-  for audit.
+**Fundamentals.** Quarterly trailing twelve month snapshots are sourced from SEC EDGAR (`edgar` and `edgartools`) via `lean_project/scripts/download_edgartools_data.py` and stored in `lean_project/data/fundamentals_history.json`. Each snapshot is keyed by `filing_date` (`filed` or `filing_date`, the SEC acceptance date), not by fiscal `period` or `report_date`. Retrieval uses `universe/pit_data.py:fundamental_as_of(ticker, as_of)` (path:line `lean_project/universe/pit_data.py:22`), which returns the latest snapshot with `filing_date <= as_of`. Legacy entries keyed by fiscal period without a `filed` field are rejected (the function returns `None`). Re-run the download script to regenerate filing-keyed history. This constraint prevents approximately 30 to 45 days of look-ahead bias. The `period` field is retained for audit only.
 
-* **ERP & risk-free** — `resolve_erp_as_of(spreadsheet_hist, histimpl_hist, as_of)`
-  is strict `< as_of` (spreadsheet PIT preferred, annual `histimpl` fallback;
-  `earliest_erp` is NOT used as fallback because it would be look-ahead before
-  series start). `resolve_risk_free_rate(tn_bars, as_of)` (`^TNX` bars) is strict
-  `<= as_of` and returns `None` when no bar exists (no invented `0.042` yield,
-  no future bar).
+**ERP and risk-free rate.** `universe/pit_data.py:resolve_erp_as_of(spreadsheet_hist, histimpl_hist, as_of)` (path:line `lean_project/universe/pit_data.py:144`) selects the latest entry with date strictly less than `as_of`. The Damodaran spreadsheet point-in-time series is preferred; the annual `histimpl` series is used as fallback. `earliest_erp` is not used as fallback because it would introduce look-ahead for dates before the series start. `universe/pit_data.py:resolve_risk_free_rate(tn_bars, as_of)` (path:line `lean_project/universe/pit_data.py:182`) selects the latest `^TNX` bar with date `<= as_of` and returns `None` when no bar exists. No static yield is substituted and no future bar is accessed.
 
-* **Corporate actions** — `data/corporate_actions.last_trading_day` is NYSE-aware
-  (`data.nys_calendar.is_nyse_open`), so holidays such as Good Friday correctly
-  shift spinoff-parent exits (e.g. SOLV 2024-04-01 → exit 2024-03-28, not 2024-03-29).
-  Membership-end exits reuse the same calendar.
+**Corporate actions.** `data/corporate_actions.py:last_trading_day` is NYSE-calendar aware (`data/nys_calendar.py:is_nyse_open`), so holidays such as Good Friday correctly shift spinoff-parent exits (for example SOLV 2024-04-01 exits on 2024-03-28, not 2024-03-29). Membership-end exits use the same calendar.
 
-## 2. Known gaps (what is NOT in the backtest)
+## 2. Known Gaps
 
-Generated by `lean_project/scripts/track_exclusions.py` + `lean_project/data/exclusions.py`
-and written to `lean_project/data/missing-data.txt` / `.json`.
+Generated by `lean_project/scripts/track_exclusions.py` and `lean_project/data/exclusions.py`, written to `lean_project/data/missing-data.txt` and `.json`.
 
-| Category | How computed | Severity / meaning |
-|----------|--------------|--------------------|
-| `broken` | `data/bar_quality.ticker_quality_verdict` fails (malformed OHLC, all-zero, >60 % single-day move → likely wrong instrument / unadjusted split) | **Action required** if non-empty — corrupt data, must not be traded |
-| `missing_window` | S&P 500 window member (`intervals_active` overlaps `[BACKTEST_START, BACKTEST_END]`) absent from `equity_bars` **and** not in `equity_unavailable.json` | **Action required** — unexplained gap, re-run pipeline |
-| `documented_unavailable` | Window member absent from bars but present in `equity_unavailable.json` (written by `fetch_missing_delisted.py`) with `reason` (`tiingo_no_prices`, `tiingo_foreign_collision`, etc.) | Expected — genuine delisting / foreign-listing collision |
-| `window_members_without_fundamentals` | **S1 survivorship gap**: `window_members - fundamentals_keys` (simple set subtraction, `data/exclusions.collect_fundamentals_gap`) — no decoupling, bars and fundamentals are independent sources | Expected coverage gap (see §3) |
+| Category | Computation | Severity |
+|----------|-------------|----------|
+| `broken` | `data/bar_quality.py:ticker_quality_verdict` fails (malformed OHLC, all-zero prices, single-day move greater than 60 percent indicating incorrect instrument or unadjusted split) | Requires action if non-empty; corrupt data must not be traded |
+| `missing_window` | S&P 500 window member (`intervals_active` overlaps `[BACKTEST_START, BACKTEST_END]`) absent from `equity_bars` and not present in `equity_unavailable.json` | Requires action; unexplained gap, re-run pipeline |
+| `documented_unavailable` | Window member absent from bars but present in `equity_unavailable.json` (written by `fetch_missing_delisted.py`) with a `reason` (`tiingo_no_prices`, `tiingo_foreign_collision`, etc.) | Expected; delisting or foreign-listing collision |
+| `window_members_without_fundamentals` | Survivorship gap defined as `window_members - fundamentals_keys` (`data/exclusions.py:collect_fundamentals_gap`). Bars and fundamentals are independent sources; no join is applied | Expected coverage gap (refer to section 3) |
 
-* `window_members` = `{t | t not in (^TNX, ^GSPC) and ∃ interval [s,e] with s <= BACKTEST_END and (e is None or e >= BACKTEST_START)}`.
-* `fundamentals_keys` = `set(fundamentals_history.json.keys())`.
-* A ticker in this last set is absent from the PIT screen (`fundamental_as_of` → `None` → skip) and therefore never bought. This is *not* a “missing data” bug to fix by joining bars to fundamentals; the subtraction is the correct disclosure.
-* `track_exclusions.py` now loads `fundamentals_history.json` automatically and includes this count in the report (and in `missing-data.txt` when available). Example from the last embed (window `2011-01-01 .. 2026-07-31`): ~829 window members, ~640 bar tickers, ~249 fundamental tickers, `window_members_without_fundamentals` ≈ 607 — i.e. most historic members lacked an EDGAR match / XBRL vintage in the current dump.
+Definitions:
 
-## 3. Survivorship & coverage notes
+- `window_members` is the set `{t | t not in (^TNX, ^GSPC) and interval [s,e] satisfies s <= BACKTEST_END and (e is None or e >= BACKTEST_START)}`.
+- `fundamentals_keys` is `set(fundamentals_history.json.keys())`.
+- A ticker in `window_members_without_fundamentals` has no point-in-time filing at the evaluation date (`fundamental_as_of` returns `None`), is skipped by the screen, and is never purchased. This is not a defect to correct by joining bars to fundamentals. The set subtraction is the correct disclosure.
 
-* **Bars vs fundamentals are decoupled by design.** Bars cover 1996+ via yfinance/Tiingo;
-  fundamentals cover only tickers with a successful EDGAR XBRL fetch (SEC EDGAR data
-  is 2009+ for detailed XBRL, earlier years have sparser data; some tickers never match
-  a CIK). A ticker can therefore have bars but no fundamentals (e.g. HOOD, KVUE, KLAC
-  in the current dump) — the PIT screen correctly skips it. No synthetic fundamental
-  is invented.
-* **Window vs HISTORY_START.** `HISTORY_START` retains pre-window constituents (so a
-  longer backtest can run without re-downloading), but the screen only considers
-  `window_members`. Tickers that exited the S&P 500 before `BACKTEST_START` are *not*
-  in the backtest; their earlier bars remain in `equity_bars.json` but are irrelevant.
-* **Throttling is recoverable, not documented as unavailable.** YFinance rate-limits
-  sometimes return “empty” for popular tickers; these appear as `PENDING` in
-  `repair_equity_data.py` and must be re-run after a cooldown — they are *not* moved
-  to `equity_unavailable.json` until `fetch_missing_delisted.py` confirms they are
-  unrecoverable.
+`track_exclusions.py` loads `fundamentals_history.json` automatically and includes this count in the report. Example from the most recent embedding (window 2011-01-01 to 2026-07-31, `lean_project/data/missing-data.json`): 829 window members, 640 bar tickers, 687 fundamental tickers, `window_members_without_fundamentals` = 210, `missing_window` = 210, `documented_unavailable` = 12. Window members without fundamentals are those lacking an EDGAR XBRL filing in the current vintage.
 
-## 4. Tiingo fallback limitation (S3, accepted)
+## 3. Survivorship and Coverage
 
-`scripts/fetch_missing_delisted.py` tries two recoveries for still-missing window members:
+- **Bars and fundamentals are decoupled.** Bars cover 1996 onward via yfinance and Tiingo. Fundamentals cover tickers with a successful EDGAR XBRL retrieval (SEC EDGAR detailed XBRL is available from approximately 2009; earlier years have sparser coverage; some tickers never match a CIK). A ticker may have bars but no fundamentals (examples in the current vintage include HOOD, KVUE, KLAC). The point-in-time screen correctly skips such tickers. No synthetic fundamental is generated.
 
-1. Curated `RENAME_MAP` (e.g. `CTL→LUMN`, `ANTM→ELV`) — successor series sliced across
-   predecessor window.
-2. Tiingo (`TIINGO_API_KEY` in `config/.env`) with mandatory US-exchange guard
-   (rejects TSX/ASX collisions as `tiingo_foreign_collision`).
+- **Window versus HISTORY_START.** `HISTORY_START` retains pre-window constituents so that a longer backtest can run without re-downloading. The screen considers only `window_members`. Tickers that exited the S&P 500 before `BACKTEST_START` are not included in the backtest. Their earlier bars remain in `equity_bars.json` but are not evaluated.
 
-If a ticker remains missing after both, it is recorded in `equity_unavailable.json`
-as `tiingo_no_prices` / `tiingo_foreign_collision` / `unrecoverable`. **No further
-action is taken** — the ticker stays excluded and the backtest disclaimer applies.
-Free-tier Tiingo limits (500 symbols/month, 1000 req/day) may require splitting
-recovery across days.
+- **Throttling is recoverable.** yfinance rate limiting may return empty responses for actively traded tickers. Such tickers appear as `PENDING` in `repair_equity_data.py` and must be retried after a cooldown. They are not moved to `equity_unavailable.json` until `fetch_missing_delisted.py` confirms they are unrecoverable.
 
-## 5. Accepted / documented limitations (no fix)
+## 4. Tiingo Fallback Limitation
 
-* **Financial classification (L1, accepted).** `universe/pb_roe_universe.is_financial`
-  uses *current* `sic` / `business_category` stored in the latest EDGAR snapshot,
-  not a PIT SIC history. A ticker that changed sector mid-window is therefore classified
-  by its present sector. This is documented as an accepted limitation (no PIT SIC
-  source exists); it cannot produce look-ahead in the valuation because financials
-  are *excluded* (rejecting a false negative is conservative, not a bias).
+`scripts/fetch_missing_delisted.py` applies two recovery methods to window members still missing after Step 2:
 
-* **Split handling (L2, accepted).** Bars are fetched with `auto_adjust=True`
-  (yfinance), so splits/dividends are adjusted in the price series. No manual
-  split stitching is required; `auto_adjust` is the accepted mechanism.
+1. Curated `RENAME_MAP` (for example `CTL` to `LUMN`, `ANTM` to `ELV`). The successor continuous series is sliced to the predecessor membership window.
+2. Tiingo (`TIINGO_API_KEY` in `config/.env`) with a mandatory US-exchange guard that rejects TSX and ASX collisions as `tiingo_foreign_collision` (path:line `lean_project/scripts/fetch_missing_delisted.py:74`).
 
-* **Aggregator / warm-up (L3, accepted).** Indicator warm-up uses
-  `BACKTEST_WARMUP_DAYS = 252` trading days via the NYSE calendar; holiday
-  handling is documented.
+If a ticker remains missing after both methods, it is recorded in `equity_unavailable.json` as `tiingo_no_prices`, `tiingo_foreign_collision`, or `unrecoverable`. No further recovery is attempted. The ticker remains excluded and the disclosure in this document applies. Tiingo free-tier limits are 500 symbols per month and 1000 requests per day. Recovery may need to be split across days.
 
-* **Config warm-up S4 (no fix).** `config/config.py:trading_days_before` uses a
-  weekday-only approximation (holidays add buffer) — conservative, not a bias.
+## 5. Accepted Limitations
 
-## 6. PIT / look-ahead fixes applied (Boss M audit)
+**Financial classification (L1).** `universe/pb_roe_universe.py:is_financial` uses the current `sic` and `business_category` from the latest EDGAR snapshot, not a point-in-time SIC history. A ticker that changed sector during the window is classified by its current sector. This is recorded as an accepted limitation. No point-in-time SIC source is available. Because financials are excluded (rejected), a false negative is conservative and does not introduce valuation look-ahead.
 
-| ID | Issue | Fix |
-|----|-------|-----|
-| **L4** | `fundamental_as_of` fell back to fiscal `period` key when `filed` missing → ~45 d look-ahead | Now **skips** legacy period-keyed entries (`continue`); returns `None`; download script must regenerate |
-| **L5** | `resolve_risk_free_rate` returned static `0.042` when no `^TNX` bar `<= as_of` → invented yield | Now returns `None`; caller `pb_roe_universe.run_fine_selection` logs `ERROR` and returns `[]` (no screen) |
-| **L6** | `corporate_actions.last_trading_day` used `weekday >=5` only → Good Friday treated as trading | Now uses `data.nys_calendar.is_nyse_open` (NYSE holidays) |
+**Split handling (L2).** Bars are retrieved with `auto_adjust=True` (yfinance). Splits and dividends are therefore adjusted in the price series. No manual split stitching is applied. This is the accepted mechanism.
 
-Dead code removed: `universe/pit_data.latest_price_as_of` (pure helper used only in tests; prod uses bar dict directly). `earliest_erp` retained with NOTE — intentionally not used as fallback.
+**Aggregator and warm-up (L3).** Indicator warm-up uses `BACKTEST_WARMUP_DAYS = 252` trading days via the NYSE calendar. Holiday handling is documented in `data/nys_calendar.py`.
 
-## 7. XBRL vintage / restatement note
+**Configuration warm-up calculation (S4).** `config/config.py:trading_days_before` (path:line `config/config.py:82`) uses a weekday-only approximation. Holidays add buffer. This is conservative and does not introduce bias.
 
-EDGAR XBRL history is vintage-sensitive: amended filings (10-Q/A, 10-K/A) and prior-period
-restatements overwrite the original filing in the current EDGAR feed. The embedded
-`fundamentals_history` therefore reflects the *latest* XBRL vintage for each filing date,
-not a first-print snapshot. This is an inherent EDGAR limitation; no additional
-restatement adjustment is applied.
+## 6. Point-in-Time Corrections
 
-## 8. How to reproduce the disclosure counts
+| ID | Condition | Correction |
+|----|-----------|------------|
+| L4 | `fundamental_as_of` fell back to fiscal `period` key when `filed` was absent, introducing approximately 45 days of look-ahead | Legacy period-keyed entries are now skipped. The function returns `None` for such entries. The download script must be re-run to regenerate filing-keyed history |
+| L5 | `resolve_risk_free_rate` returned a static `0.042` when no `^TNX` bar at or before `as_of` existed | The function now returns `None`. The caller `pb_roe_universe.py:run_fine_selection` logs an error and returns an empty selection |
+| L6 | `corporate_actions.py:last_trading_day` used `weekday >= 5` only, treating Good Friday as a trading day | Now uses `data/nys_calendar.py:is_nyse_open` (NYSE holiday calendar) |
+
+Removed: `universe/pit_data.py:latest_price_as_of` (helper used only in tests; production code uses the bar dictionary directly). `earliest_erp` is retained with a documented note and is intentionally not used as fallback.
+
+## 7. XBRL Vintage and Restatement
+
+EDGAR XBRL history is vintage-sensitive. Amended filings (10-Q/A, 10-K/A) and prior-period restatements overwrite the original filing in the current EDGAR feed. The embedded `fundamentals_history` therefore reflects the latest XBRL vintage for each filing date, not the first-print values. This is an inherent EDGAR limitation. No additional restatement adjustment is applied.
+
+## 8. Reproducing Disclosure Counts
 
 ```powershell
-cd lean_project
+Set-Location lean_project
 python scripts/track_exclusions.py
-# writes lean_project/data/missing-data.txt (human) + missing-data.json (machine)
-# console: broken=… missing_window=… documented=… window_members_without_fundamentals=…
+# Writes lean_project/data/missing-data.txt and missing-data.json
+# Console output: broken, missing_window, documented, window_members_without_fundamentals
 ```
 
-`window_members_without_fundamentals` is literally:
+Definition of `window_members_without_fundamentals`:
+
 ```python
-window_members = {t for t,ivs in membership.items()
-                  if t not in ("^TNX","^GSPC") and overlaps(ivs, BACKTEST_START, BACKTEST_END)}
+window_members = {
+    t for t, ivs in membership.items()
+    if t not in ("^TNX", "^GSPC") and overlaps(ivs, BACKTEST_START, BACKTEST_END)
+}
 gap = window_members - set(fundamentals_history.keys())
 ```
 
-See also `docs/equity-data-pipeline.md` for the full five-step pipeline and recovery scenarios.
+Refer to `docs/equity-data-pipeline.md` for the complete five-step pipeline and recovery scenarios.
